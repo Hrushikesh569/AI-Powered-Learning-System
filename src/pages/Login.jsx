@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Mail, Lock, Brain } from 'lucide-react';
+import { agentAPI, setAuthToken } from '../api';
 
 const Login = () => {
     const navigate = useNavigate();
@@ -9,11 +10,44 @@ const Login = () => {
         email: '',
         password: '',
     });
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        // Mock login - navigate to dashboard
-        navigate('/dashboard');
+        setLoading(true);
+        setError('');
+        try {
+            const res = await agentAPI.login({
+                email: formData.email,
+                password: formData.password,
+            });
+
+            // Keep UX flowing even when backend auth is in stub mode.
+            const token = res?.access_token || res?.token || null;
+            if (token) setAuthToken(token);
+            
+            // Clear old user data and set new user data
+            localStorage.removeItem('taskStatuses');
+            localStorage.removeItem('preferredTopics');
+            localStorage.removeItem('hiddenSubjects');
+            localStorage.removeItem('generatedSchedule');
+            localStorage.removeItem('learningPreferences');
+            localStorage.removeItem('completedSubjects');
+            localStorage.removeItem('completedTopics');
+            localStorage.removeItem('missedTopics');
+            localStorage.removeItem('activityMap');
+            localStorage.removeItem('scheduleOverrides');
+            localStorage.removeItem('preferredSubjectToday');
+            localStorage.setItem('userEmail', formData.email);
+            if (res?.name) localStorage.setItem('userName', res.name);
+
+            navigate('/dashboard');
+        } catch (_err) {
+            setError('Login failed. Please check your credentials and try again.');
+        } finally {
+            setLoading(false);
+        }
     };
 
     return (
@@ -74,8 +108,10 @@ const Login = () => {
                     </div>
 
                     <button type="submit" className="btn-primary w-full">
-                        Sign In
+                        {loading ? 'Signing In...' : 'Sign In'}
                     </button>
+
+                    {error && <p className="text-sm text-red-600 -mt-2">{error}</p>}
 
                     <div className="relative my-6">
                         <div className="absolute inset-0 flex items-center">

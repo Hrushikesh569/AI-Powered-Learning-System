@@ -50,7 +50,7 @@ try:
     joblib.dump(rf, os.path.join(MODEL_DIR, 'progress', 'model.pkl'))
 except Exception as e:
     print(f"  Error: {e}")
-    metrics['progress'] = {'auc': 0.96}
+    metrics['progress'] = {'auc': None, 'error': str(e)}
 
 # ==================== MOTIVATION ====================
 print("\n[2/4] Motivation Agent (Multiclass)...")
@@ -85,7 +85,7 @@ try:
     joblib.dump(rf, os.path.join(MODEL_DIR, 'motivation', 'model.pkl'))
 except Exception as e:
     print(f"  Error: {e}")
-    metrics['motivation'] = {'accuracy': 0.96, 'f1': 0.96}
+    metrics['motivation'] = {'accuracy': None, 'f1': None, 'error': str(e)}
 
 # ==================== RESCHEDULE ====================
 print("\n[3/4] Reschedule Agent (Regression)...")
@@ -116,7 +116,7 @@ try:
     joblib.dump(rf, os.path.join(MODEL_DIR, 'reschedule', 'model.pkl'))
 except Exception as e:
     print(f"  Error: {e}")
-    metrics['reschedule'] = {'r2': 0.92}
+    metrics['reschedule'] = {'r2': None, 'error': str(e)}
 
 # ==================== PROFILING ====================
 print("\n[4/4] Profiling Agent (Clustering)...")
@@ -144,7 +144,7 @@ try:
         raise ValueError("No valid data")
 except Exception as e:
     print(f"  Error: {e}")
-    metrics['profiling'] = {'silhouette': 0.68, 'n_clusters': 4}
+    metrics['profiling'] = {'silhouette': None, 'n_clusters': None, 'error': str(e)}
 
 # ==================== SAVE METRICS ====================
 print("\n" + "="*60)

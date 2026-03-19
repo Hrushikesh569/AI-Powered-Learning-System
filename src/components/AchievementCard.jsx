@@ -1,5 +1,19 @@
 import { motion } from 'framer-motion';
-import { Trophy, Award, Target, Lightbulb, TrendingUp } from 'lucide-react';
+
+const ICON_MAP = {
+    fire: '🔥',
+    star: '⭐',
+    trophy: '🏆',
+    award: '🎖️',
+    target: '🎯',
+    lightbulb: '💡',
+    book: '📚',
+    check: '✅',
+    rocket: '🚀',
+    heart: '❤️',
+};
+
+const resolveIcon = (icon) => ICON_MAP[icon?.toLowerCase()] || icon || '🏅';
 
 const AchievementCard = ({ achievement }) => {
     return (
@@ -13,7 +27,7 @@ const AchievementCard = ({ achievement }) => {
                 }`}
         >
             <div className="flex items-start justify-between mb-2">
-                <span className="text-3xl">{achievement.icon}</span>
+                <span className="text-3xl">{resolveIcon(achievement.icon)}</span>
                 {achievement.unlocked && (
                     <span className="text-xs bg-green-500 text-white px-2 py-1 rounded-full">
                         Unlocked
@@ -23,9 +37,11 @@ const AchievementCard = ({ achievement }) => {
             <h3 className="font-semibold text-gray-800 mb-1">{achievement.title}</h3>
             <p className="text-sm text-gray-600 mb-2">{achievement.description}</p>
             {achievement.unlocked ? (
-                <p className="text-xs text-gray-500">
-                    Unlocked on {new Date(achievement.unlockedDate).toLocaleDateString()}
-                </p>
+                achievement.unlockedDate && (
+                    <p className="text-xs text-gray-500">
+                        Unlocked on {new Date(achievement.unlockedDate).toLocaleDateString()}
+                    </p>
+                )
             ) : (
                 achievement.progress !== undefined && (
                     <div>

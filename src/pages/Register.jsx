@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Mail, Lock, User, Clock, Target, Brain } from 'lucide-react';
+import { Mail, Lock, User, Target, Brain } from 'lucide-react';
+import { agentAPI, setAuthToken } from '../api';
 
 const Register = () => {
     const navigate = useNavigate();
@@ -12,12 +13,66 @@ const Register = () => {
         confirmPassword: '',
         studyHours: 5,
         learningGoal: '',
+        grade: '',
+        course: '',
     });
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        // Mock registration - navigate to profiling
-        navigate('/profiling');
+        if (formData.password !== formData.confirmPassword) {
+            setError('Passwords do not match.');
+            return;
+        }
+
+        setLoading(true);
+        setError('');
+        try {
+            const res = await agentAPI.register({
+                name: formData.name,
+                email: formData.email,
+                password: formData.password,
+                studyHoursPerDay: Number(formData.studyHours),
+                learningGoal: formData.learningGoal,
+                grade: formData.grade,
+                course: formData.course,
+            });
+
+            // Store JWT from response
+            setAuthToken(res.access_token);
+            
+            // Clear old user data
+            localStorage.removeItem('taskStatuses');
+            localStorage.removeItem('preferredTopics');
+            localStorage.removeItem('hiddenSubjects');
+            localStorage.removeItem('generatedSchedule');
+            localStorage.removeItem('completedSubjects');
+            localStorage.removeItem('completedTopics');
+            localStorage.removeItem('missedTopics');
+            localStorage.removeItem('activityMap');
+            localStorage.removeItem('scheduleOverrides');
+            localStorage.removeItem('preferredSubjectToday');
+            
+            // Set new user data
+            localStorage.setItem('userName', res.name || formData.name);
+            localStorage.setItem('userEmail', res.email || formData.email);
+            localStorage.setItem(
+                'learningPreferences',
+                JSON.stringify({
+                    studyHours: Number(formData.studyHours),
+                    learningGoal: formData.learningGoal,
+                    grade: formData.grade,
+                    course: formData.course,
+                }),
+            );
+
+            navigate('/profiling');
+        } catch (_err) {
+            setError('Registration failed. Please try again.');
+        } finally {
+            setLoading(false);
+        }
     };
 
     return (
@@ -112,6 +167,28 @@ const Register = () => {
                     </div>
 
                     <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Grade / Year</label>
+                        <input
+                            type="text"
+                            value={formData.grade}
+                            onChange={(e) => setFormData({ ...formData, grade: e.target.value })}
+                            className="input-field"
+                            placeholder="e.g., 10, 12, B.Tech Year 2"
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Course / Stream</label>
+                        <input
+                            type="text"
+                            value={formData.course}
+                            onChange={(e) => setFormData({ ...formData, course: e.target.value })}
+                            className="input-field"
+                            placeholder="e.g., Computer Science, Engineering"
+                        />
+                    </div>
+
+                    <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Learning Goal</label>
                         <div className="relative">
                             <Target className="absolute left-3 top-3 w-5 h-5 text-gray-400" />
@@ -126,8 +203,10 @@ const Register = () => {
                     </div>
 
                     <button type="submit" className="btn-primary w-full">
-                        Create Account
+                        {loading ? 'Creating Account...' : 'Create Account'}
                     </button>
+
+                    {error && <p className="text-sm text-red-600">{error}</p>}
                 </form>
 
                 <p className="text-center text-sm text-gray-600 mt-6">

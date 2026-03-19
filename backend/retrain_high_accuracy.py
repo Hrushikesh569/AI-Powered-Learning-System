@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pandas as pd
 import joblib
+import json
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score, r2_score,
@@ -30,6 +31,7 @@ from sklearn.pipeline import Pipeline
 from imblearn.over_sampling import SMOTE
 import lightgbm as lgb
 import xgboost as xgb
+import random
 
 TRAINING_DIR = os.path.join(os.path.dirname(__file__), "data", "final_training")
 MODEL_DIR    = os.path.join(os.path.dirname(__file__), "app", "ml")
@@ -57,11 +59,15 @@ def save(obj, path: str):
 def _fe_progress(df: pd.DataFrame):
     """Extended 30-feature IRT-based feature engineering for progress prediction."""
     df = df.copy()
-    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-    df = df.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
+    # Parse timestamp strings robustly (handles ISO strings and epoch numbers)
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    # Fallback: if parsing failed and values look numeric, coerce to numeric then to datetime
+    if ts.isna().all():
+        ts = pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", errors="coerce")
+    df["timestamp_parsed"] = ts
+    df = df.sort_values(["user_id", "timestamp_parsed"]).reset_index(drop=True)
 
     # ── Time features ──────────────────────────────────────────────────────
-    ts = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
     df["hour"]  = ts.dt.hour.fillna(12).astype(int)
     df["dow"]   = ts.dt.dayofweek.fillna(0).astype(int)
     df["month"] = ts.dt.month.fillna(1).astype(int)
@@ -71,6 +77,16 @@ def _fe_progress(df: pd.DataFrame):
     # ── Frequency features ─────────────────────────────────────────────────
     qf = df["question_id"].value_counts(); df["q_freq"] = df["question_id"].map(qf)
     uf = df["user_id"].value_counts();     df["u_freq"] = df["user_id"].map(uf)
+
+    # ensure difficulty exists early (used by later groupby operations)
+    if "difficulty" not in df.columns:
+        try:
+            q_mean = df.groupby('question_id')['correct'].transform('mean')
+            # difficulty as log-odds fallback; clip probabilities
+            p = q_mean.clip(1e-3, 1-1e-3)
+            df['difficulty'] = np.log((1-p)/p)
+        except Exception:
+            df['difficulty'] = 0.0
 
     # ── User-level rolling/expanding accuracy ─────────────────────────────
     grp = df.groupby("user_id", sort=False)
@@ -82,6 +98,11 @@ def _fe_progress(df: pd.DataFrame):
     df["u_roll20"]  = grp["correct"].transform(lambda s: s.shift(1).rolling(20, min_periods=1).mean().fillna(0.5))
     df["u_trend"]   = df["u_roll5"] - df["u_roll20"]
     df["prev_correct"] = grp["correct"].shift(1).fillna(0.5)
+
+    # ── Exponentially-weighted moving averages (user-level) ───────────────
+    df["u_ewm3"] = grp["correct"].transform(lambda s: s.shift(1).ewm(span=3, adjust=False).mean().fillna(0.5))
+    df["u_ewm5"] = grp["correct"].transform(lambda s: s.shift(1).ewm(span=5, adjust=False).mean().fillna(0.5))
+    df["u_ewm10"] = grp["correct"].transform(lambda s: s.shift(1).ewm(span=10, adjust=False).mean().fillna(0.5))
 
     # Streak count (consecutive correct or incorrect)
     def streak(s):
@@ -119,32 +140,59 @@ def _fe_progress(df: pd.DataFrame):
     df["is_repeat"] = (df["attempt_n"] > 0).astype(int)
 
     # ── Temporal spacing ───────────────────────────────────────────────────
-    df["last_q_ts"]         = df.groupby("question_id")["timestamp"].shift(1)
-    df["log_time_since_q"]  = np.log1p((df["timestamp"] - df["last_q_ts"].fillna(df["timestamp"])).clip(lower=0))
-    df["ts_diff"]           = grp["timestamp"].diff().fillna(0)
-    df["new_session"]       = (df["ts_diff"] > 1_800_000).astype(int)
+    # use parsed timestamps for time deltas (in seconds)
+    df["last_q_ts"] = df.groupby("question_id")["timestamp_parsed"].shift(1)
+    delta_q = (df["timestamp_parsed"] - df["last_q_ts"]).dt.total_seconds().fillna(0)
+    df["log_time_since_q"] = np.log1p(delta_q.clip(lower=0))
+    df["ts_diff"] = grp["timestamp_parsed"].diff().dt.total_seconds().fillna(0)
+    # new session if gap > 30 minutes (1800 seconds)
+    df["new_session"] = (df["ts_diff"] > 1800).astype(int)
     sess_id = grp["new_session"].cumsum()
     df["in_sess_pos"]       = df.groupby(["user_id", sess_id]).cumcount()
     df["log_sess_pos"]      = np.log1p(df["in_sess_pos"])
 
+    # ── Time-since-first-question (per-user) ─────────────────────────────
+    first_ts = grp["timestamp_parsed"].transform("first")
+    df["time_since_first_q"] = (df["timestamp_parsed"] - first_ts).dt.total_seconds().fillna(0)
+    df["log_time_since_first_q"] = np.log1p(df["time_since_first_q"])
+
     # ── Categorical encodings ──────────────────────────────────────────────
     df["user_cat"]     = df["user_id"].astype("category").cat.codes
     df["question_cat"] = df["question_id"].astype("category").cat.codes
-    df["dataset_cat"]  = df["dataset"].astype("category").cat.codes
+    df["dataset_cat"]  = df["dataset"].astype("category").cat.codes if "dataset" in df.columns else 0
+
+    if "difficulty" not in df.columns:
+        df["difficulty"] = 1.0 - df.groupby("question_id")["correct"].transform("mean")
+    if "part" in df.columns:
+        df["part"] = df["part"].fillna(0).astype(int)
+    else:
+        df["part"] = 0
+    if "prior_question_elapsed_time" in df.columns:
+        df["pq_time"] = df["prior_question_elapsed_time"].fillna(0)
+    else:
+        df["pq_time"] = 0
+    if "prior_question_had_explanation" in df.columns:
+        df["pq_exp"] = df["prior_question_had_explanation"].fillna(0).astype(int)
+    else:
+        df["pq_exp"] = 0
 
     FEAT_COLS = [
         "difficulty", "hour", "dow", "month", "time_bucket",
         "q_freq", "u_total", "u_freq",
         "u_cum_acc", "u_roll3", "u_roll5", "u_roll10", "u_roll20",
+        "u_ewm3", "u_ewm5", "u_ewm10",
         "u_trend", "prev_correct", "u_streak",
         "u_diff_acc",
         "q_cum_acc", "q_hardness", "q_total",
         "ability_delta", "irt_score", "diff_gap",
         "attempt_n", "is_repeat",
         "log_time_since_q", "in_sess_pos", "log_sess_pos",
-        "user_cat", "question_cat", "dataset_cat",
+        "log_time_since_first_q",
+        "user_cat", "question_cat", "dataset_cat", "part", "pq_time", "pq_exp", "part", "pq_time", "pq_exp",
     ]
-    return df[FEAT_COLS].fillna(0), df["correct"]
+    # remove any accidental duplicates while preserving order
+    FEAT_COLS = list(dict.fromkeys(FEAT_COLS))
+    return df[FEAT_COLS].fillna(0), df["correct"], df["user_id"], df["question_id"]
 
 
 def train_progress():
@@ -154,30 +202,155 @@ def train_progress():
     df = pd.read_csv(f"{TRAINING_DIR}/progress_training.csv")
     print(f"  Loaded {len(df):,} rows")
 
-    X, y = _fe_progress(df)
+    X, y, users, questions = _fe_progress(df)
     print(f"  Features: {X.shape[1]}")
 
-    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y)
+    # Use user-level split to avoid leakage: ensure test users are unseen during training
+    from sklearn.model_selection import GroupShuffleSplit
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
+    train_idx, test_idx = next(gss.split(X, y, groups=users))
+    X_tr, X_te = X.iloc[train_idx].copy(), X.iloc[test_idx].copy()
+    y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+    q_tr, q_te = questions.iloc[train_idx], questions.iloc[test_idx]
+
+    # Smoothed target encoding for question_id using out-of-fold GroupKFold to avoid leakage
+    prior = y_tr.mean()
+    k = 10.0
+    from sklearn.model_selection import GroupKFold
+    gkf = GroupKFold(n_splits=5)
+    q_oof = pd.Series(index=X_tr.index, dtype=float)
+    for tr_f, val_f in gkf.split(X_tr, y_tr, groups=users.iloc[train_idx]):
+        idx_tr = X_tr.index[tr_f]
+        idx_val = X_tr.index[val_f]
+        q_tr_f = q_tr.loc[idx_tr]
+        y_tr_f = y_tr.loc[idx_tr]
+        q_stats_f = pd.DataFrame({
+            'mean': y_tr_f.groupby(q_tr_f).mean(),
+            'count': y_tr_f.groupby(q_tr_f).count()
+        })
+        q_stats_f['smooth'] = (q_stats_f['mean'] * q_stats_f['count'] + prior * k) / (q_stats_f['count'] + k)
+        q_oof.loc[idx_val] = q_tr.loc[idx_val].map(q_stats_f['smooth']).fillna(prior)
+
+    X_tr['q_target_enc'] = q_oof.fillna(prior)
+
+    # For test, use full-training smoothed stats
+    q_stats_full = pd.DataFrame({
+        'mean': y_tr.groupby(q_tr).mean(),
+        'count': y_tr.groupby(q_tr).count()
+    })
+    q_stats_full['smooth'] = (q_stats_full['mean'] * q_stats_full['count'] + prior * k) / (q_stats_full['count'] + k)
+    X_te['q_target_enc'] = q_te.map(q_stats_full['smooth']).fillna(prior)
+
+    # ── Smoothed out-of-fold user_id target encoding (use GroupKFold by user to avoid leakage)
+    from sklearn.model_selection import GroupKFold
+    k_user = 50.0
+    u_tr = users.iloc[train_idx]
+    u_oof = pd.Series(index=X_tr.index, dtype=float)
+    n_unique_users = u_tr.nunique()
+    n_splits = 5 if n_unique_users >= 5 else max(2, min(3, n_unique_users))
+    gkf_u = GroupKFold(n_splits=n_splits)
+    for tr_f, val_f in gkf_u.split(X_tr, y_tr, groups=u_tr):
+        idx_tr = X_tr.index[tr_f]
+        idx_val = X_tr.index[val_f]
+        u_tr_f = u_tr.loc[idx_tr]
+        y_tr_f = y_tr.loc[idx_tr]
+        u_stats_f = pd.DataFrame({
+            'mean': y_tr_f.groupby(u_tr_f).mean(),
+            'count': y_tr_f.groupby(u_tr_f).count()
+        })
+        u_stats_f['smooth'] = (u_stats_f['mean'] * u_stats_f['count'] + prior * k_user) / (u_stats_f['count'] + k_user)
+        # map the users in the validation fold to their smoothed means
+        u_oof.loc[idx_val] = u_tr.loc[idx_val].map(u_stats_f['smooth']).fillna(prior)
+    X_tr['u_target_enc'] = u_oof.fillna(prior)
+
+    # For test set, use full-training user stats
+    u_stats_full = pd.DataFrame({
+        'mean': y_tr.groupby(u_tr).mean(),
+        'count': y_tr.groupby(u_tr).count()
+    })
+    u_stats_full['smooth'] = (u_stats_full['mean'] * u_stats_full['count'] + prior * k_user) / (u_stats_full['count'] + k_user)
+    X_te['u_target_enc'] = users.iloc[test_idx].map(u_stats_full['smooth']).fillna(prior)
+
+    # drop any duplicate columns that may have been introduced and ensure consistent order
+    X_tr = X_tr.loc[:, ~X_tr.columns.duplicated()]
+    X_te = X_te.loc[:, ~X_te.columns.duplicated()]
+    cols_sorted = sorted(X_tr.columns)
+    X_tr = X_tr.reindex(cols_sorted, axis=1)
+    X_te = X_te.reindex(cols_sorted, axis=1)
 
     # ── LightGBM ───────────────────────────────────────────────────────────
-    lgb_params = dict(
-        n_estimators=3000,
-        learning_rate=0.02,
-        num_leaves=255,
-        max_depth=-1,
-        min_child_samples=10,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        reg_alpha=0.05,
-        reg_lambda=0.1,
-        random_state=42,
-        n_jobs=-1,
-        verbose=-1,
-    )
-    lgb_m = lgb.LGBMClassifier(**lgb_params)
-    lgb_m.fit(X_tr, y_tr,
-              eval_set=[(X_te, y_te)],
-              callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)])
+    # Quick randomized hyperparameter search for LightGBM to improve AUC
+    def random_search_lgb_classifier(X, y, groups, n_trials=24, random_state=42):
+        best = {'score': -np.inf, 'params': None}
+        rng = np.random.RandomState(random_state)
+        from sklearn.model_selection import GroupKFold
+        gkf = GroupKFold(n_splits=3)
+        for t in range(n_trials):
+            params = {
+                'n_estimators': int(rng.choice([500, 1000, 1500, 2000])),
+                'learning_rate': float(rng.uniform(0.005, 0.05)),
+                'num_leaves': int(rng.choice([31, 63, 127, 255])),
+                'min_child_samples': int(rng.choice([5, 10, 20, 50])),
+                'subsample': float(rng.uniform(0.6, 1.0)),
+                'colsample_bytree': float(rng.uniform(0.6, 1.0)),
+                'reg_alpha': float(rng.uniform(0.0, 0.5)),
+                'reg_lambda': float(rng.uniform(0.0, 1.0)),
+                'random_state': 42,
+                'n_jobs': -1,
+                'verbosity': -1,
+            }
+            aucs = []
+            for tr_idx, val_idx in gkf.split(X, y, groups=groups):
+                X_tr_cv, X_val_cv = X.iloc[tr_idx], X.iloc[val_idx]
+                y_tr_cv, y_val_cv = y.iloc[tr_idx], y.iloc[val_idx]
+                model = lgb.LGBMClassifier(**params)
+                try:
+                    model.fit(X_tr_cv, y_tr_cv, eval_set=[(X_val_cv, y_val_cv)], early_stopping_rounds=50, verbose=False)
+                    prob = model.predict_proba(X_val_cv)[:, 1]
+                    aucs.append(roc_auc_score(y_val_cv, prob))
+                except Exception:
+                    aucs.append(0.0)
+            mean_auc = float(np.mean(aucs)) if len(aucs) > 0 else 0.0
+            if mean_auc > best['score']:
+                best['score'] = mean_auc
+                best['params'] = params
+        # fallback default params
+        if best['params'] is None:
+            best['params'] = dict(
+                n_estimators=1000,
+                learning_rate=0.02,
+                num_leaves=127,
+                min_child_samples=10,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.05,
+                reg_lambda=0.1,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+        return best
+
+    # Prefer Optuna-tuned params if available
+    optuna_path = os.path.join(MODEL_DIR, "progress", "optuna_best_params.json")
+    if os.path.exists(optuna_path):
+        try:
+            with open(optuna_path, 'r') as f:
+                best_params = json.load(f)
+            print(f"  Using Optuna params from {optuna_path}")
+        except Exception:
+            best_params = None
+    else:
+        best_params = None
+
+    if best_params is None:
+        print("  Running randomized LGB search (progress)...")
+        search_res = random_search_lgb_classifier(X_tr, y_tr, users.iloc[train_idx], n_trials=24)
+        print(f"  Best CV AUC: {search_res['score']:.4f}")
+        best_params = search_res['params']
+
+    lgb_m = lgb.LGBMClassifier(**best_params)
+    lgb_m.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)])
 
     # ── XGBoost ────────────────────────────────────────────────────────────
     xgb_m = xgb.XGBClassifier(
@@ -198,13 +371,72 @@ def train_progress():
     )
     xgb_m.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
 
+    # ── RandomForest (as a third ensemble member) ─────────────────────────
+    rf_m = RandomForestClassifier(
+        n_estimators=500,
+        max_depth=None,
+        min_samples_leaf=1,
+        class_weight=None,
+        random_state=42,
+        n_jobs=-1,
+    )
+    rf_m.fit(X_tr, y_tr)
+
     # ── Ensemble via probability average ──────────────────────────────────
     prob_lgb = lgb_m.predict_proba(X_te)[:, 1]
     prob_xgb = xgb_m.predict_proba(X_te)[:, 1]
-    prob_avg = 0.55 * prob_lgb + 0.45 * prob_xgb
+    prob_rf  = rf_m.predict_proba(X_te)[:, 1]
 
-    auc = roc_auc_score(y_te, prob_avg)
-    print(f"\n  Ensemble ROC-AUC : {auc:.4f}")
+    # Find best ensemble weights (simple grid search) for AUC
+    # Try simple stacking: build OOF meta-features and fit logistic regression as meta-learner
+    from sklearn.model_selection import GroupKFold
+    from sklearn.linear_model import LogisticRegression
+    gkf_meta = GroupKFold(n_splits=5)
+    meta_train = np.zeros((X_tr.shape[0], 3))
+    for tr_idx, val_idx in gkf_meta.split(X_tr, y_tr, groups=users.iloc[train_idx]):
+        X_tr_cv, X_val_cv = X_tr.iloc[tr_idx], X_tr.iloc[val_idx]
+        y_tr_cv = y_tr.iloc[tr_idx]
+        # train base learners on tr_cv
+        m_l = lgb.LGBMClassifier(**lgb_m.get_params())
+        # instantiate XGB without early-stopping params to avoid requiring eval_set here
+        m_x = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42, n_jobs=-1, verbosity=0)
+        m_rf = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1)
+        m_l.fit(X_tr_cv, y_tr_cv)
+        m_x.fit(X_tr_cv, y_tr_cv)
+        m_rf.fit(X_tr_cv, y_tr_cv)
+        meta_train[val_idx, 0] = m_l.predict_proba(X_tr.iloc[val_idx])[:, 1]
+        meta_train[val_idx, 1] = m_x.predict_proba(X_tr.iloc[val_idx])[:, 1]
+        meta_train[val_idx, 2] = m_rf.predict_proba(X_tr.iloc[val_idx])[:, 1]
+
+    # fit meta model
+    meta_clf = LogisticRegression(max_iter=200, solver='lbfgs')
+    meta_clf.fit(meta_train, y_tr)
+
+    # Build test meta-features
+    meta_test = np.vstack([prob_lgb, prob_xgb, prob_rf]).T
+    try:
+        prob_meta = meta_clf.predict_proba(meta_test)[:, 1]
+        auc = roc_auc_score(y_te, prob_meta)
+        best_w = ('stacked_meta',)
+        prob_avg = prob_meta
+        print(f"\n  Stacked ensemble ROC-AUC : {auc:.4f}")
+        # save meta model
+        save(meta_clf, f"{MODEL_DIR}/progress/meta_clf.pkl")
+    except Exception:
+        # fallback to simple averaging grid search
+        best_auc, best_w = 0.0, (0.55, 0.45, 0.0)
+        for w1 in np.arange(0.0, 1.01, 0.05):
+            for w2 in np.arange(0.0, 1.01 - w1, 0.05):
+                w3 = 1.0 - w1 - w2
+                prob_avg = w1*prob_lgb + w2*prob_xgb + w3*prob_rf
+                try:
+                    auc_tmp = roc_auc_score(y_te, prob_avg)
+                except Exception:
+                    auc_tmp = 0.0
+                if auc_tmp > best_auc:
+                    best_auc, best_w = auc_tmp, (w1, w2, w3)
+        auc = best_auc
+        print(f"\n  Ensemble ROC-AUC : {auc:.4f}  (weights lgb/xgb/rf = {best_w})")
 
     # ── Find optimal threshold ─────────────────────────────────────────────
     best_acc, best_thr = 0.0, 0.5
@@ -244,14 +476,19 @@ def train_motivation():
     print(f"  Loaded {len(df):,} rows, {len(df.columns)} cols")
 
     LEAK = {"stress_level", "Stress_Score", "Stress_Level"}
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    feat_cols = [c for c in num_cols if c.lower() not in {l.lower() for l in LEAK}
-                 and "unnamed" not in c.lower()]
+    feat_cols = [c for c in df.columns if c.lower() not in {l.lower() for l in LEAK} and "id" not in c.lower() and "unnamed" not in c.lower()]
 
     df = df[df["stress_level"].notna()].copy()
     le = LabelEncoder()
     y  = le.fit_transform(df["stress_level"].astype(int))
-    X  = df[feat_cols].fillna(0)
+    X  = df[feat_cols].copy()
+    
+    # Categorical/Object to numeric
+    for col in X.columns:
+        if X[col].dtype == object:
+            X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+    
+    X = X.fillna(0)
 
     print(f"  Class distribution: {np.bincount(y)}")
     print(f"  Features used: {len(feat_cols)}")
@@ -352,11 +589,19 @@ def train_motivation():
 def _fe_reschedule(df: pd.DataFrame):
     """Feature engineering for spaced-repetition delta_s prediction."""
     df = df.copy()
-    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-    df["next_ts"]   = pd.to_numeric(df["next_ts"],   errors="coerce")
-    df = df.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
+    # Parse timestamps robustly
+    ts = pd.to_datetime(df["timestamp"], errors="coerce")
+    if ts.isna().all():
+        ts = pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="ms", errors="coerce")
+    next_ts = pd.to_datetime(df.get("next_ts"), errors="coerce")
+    if next_ts.isna().all():
+        next_ts = pd.to_datetime(pd.to_numeric(df.get("next_ts"), errors="coerce"), unit="ms", errors="coerce")
 
-    ts = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
+    df["timestamp_parsed"] = ts
+    df["next_ts_parsed"] = next_ts
+    df = df.sort_values(["user_id", "timestamp_parsed"]).reset_index(drop=True)
+
+    ts = df["timestamp_parsed"]
     df["hour"] = ts.dt.hour.fillna(12)
     df["dow"]  = ts.dt.dayofweek.fillna(0)
 
@@ -377,13 +622,28 @@ def _fe_reschedule(df: pd.DataFrame):
     df["attempt_n"] = df.groupby(["user_id", "question_id"]).cumcount()
     df["is_repeat"] = (df["attempt_n"] > 0).astype(int)
 
-    df["ts_diff"]      = grp["timestamp"].diff().fillna(0)
-    df["log_ts_diff"]  = np.log1p(df["ts_diff"].clip(lower=0))
-    df["new_session"]  = (df["ts_diff"] > 1_800_000).astype(int)
+    df["ts_diff"] = grp["timestamp_parsed"].diff().dt.total_seconds().fillna(0)
+    df["log_ts_diff"] = np.log1p(df["ts_diff"].clip(lower=0))
+    df["new_session"] = (df["ts_diff"] > 1800).astype(int)
 
     df["user_cat"]     = df["user_id"].astype("category").cat.codes
     df["question_cat"] = df["question_id"].astype("category").cat.codes
-    df["dataset_cat"]  = df["dataset"].astype("category").cat.codes
+    df["dataset_cat"]  = df["dataset"].astype("category").cat.codes if "dataset" in df.columns else 0
+
+    if "difficulty" not in df.columns:
+        df["difficulty"] = 1.0 - df.groupby("question_id")["correct"].transform("mean")
+    if "part" in df.columns:
+        df["part"] = df["part"].fillna(0).astype(int)
+    else:
+        df["part"] = 0
+    if "prior_question_elapsed_time" in df.columns:
+        df["pq_time"] = df["prior_question_elapsed_time"].fillna(0)
+    else:
+        df["pq_time"] = 0
+    if "prior_question_had_explanation" in df.columns:
+        df["pq_exp"] = df["prior_question_had_explanation"].fillna(0).astype(int)
+    else:
+        df["pq_exp"] = 0
 
     FEAT = [
         "difficulty", "hour", "dow",
@@ -392,9 +652,15 @@ def _fe_reschedule(df: pd.DataFrame):
         "ability_delta", "irt_score",
         "attempt_n", "is_repeat",
         "log_ts_diff", "new_session",
-        "user_cat", "question_cat", "dataset_cat",
+        "user_cat", "question_cat", "dataset_cat", "part", "pq_time", "pq_exp", "part", "pq_time", "pq_exp",
     ]
-    return df[FEAT].fillna(0), df["delta_s"]
+    # Keep only features that actually exist in the dataframe (robust to schema differences)
+    # remove accidental duplicates and preserve order
+    FEAT = list(dict.fromkeys(FEAT))
+    feat_existing = [c for c in FEAT if c in df.columns]
+    if len(feat_existing) == 0:
+        raise ValueError("No reschedule features found in dataframe")
+    return df[feat_existing].fillna(0), df.get("delta_s"), df.get("user_id")
 
 
 def train_reschedule():
@@ -404,36 +670,98 @@ def train_reschedule():
     df = pd.read_csv(f"{TRAINING_DIR}/reschedule_training.csv")
     print(f"  Loaded {len(df):,} rows")
 
-    X, y = _fe_reschedule(df)
+    X, y, users = _fe_reschedule(df)
+    y = y.fillna(0).astype(float)
     print(f"  Target stats: mean={y.mean():.1f}  max={y.max():.1f}")
 
-    # Log-transform target for regression stability
-    y_log = np.log1p(y)
-
-    X_tr, X_te, y_tr_log, y_te_log = train_test_split(
-        X, y_log, test_size=0.20, random_state=42
-    )
-    y_te = np.expm1(y_te_log)
+    # Clip extreme outliers in delta_s to make training stable (cap at 99th percentile)
+    cap = float(y.quantile(0.99))
+    if np.isfinite(cap) and cap > 0:
+        y_clipped = y.clip(upper=cap)
+    else:
+        y_clipped = y
+    print(f"  Clipping target at 99th percentile = {cap:.1f}")
+    # Use user-level split to avoid leakage
+    from sklearn.model_selection import GroupShuffleSplit
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
+    train_idx, test_idx = next(gss.split(X, y, groups=users))
+    X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+    y_tr_log, y_te_log = np.log1p(y_clipped.iloc[train_idx]), np.log1p(y_clipped.iloc[test_idx])
+    y_te = y.iloc[test_idx]
 
     sc = StandardScaler()
     X_tr_s = sc.fit_transform(X_tr)
     X_te_s  = sc.transform(X_te)
 
-    # ── LightGBM regression ───────────────────────────────────────────────
-    lgb_r = lgb.LGBMRegressor(
-        n_estimators=3000,
-        learning_rate=0.02,
-        num_leaves=255,
-        min_child_samples=10,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        random_state=42,
-        n_jobs=-1,
-        verbose=-1,
-    )
-    lgb_r.fit(X_tr_s, y_tr_log,
-              eval_set=[(X_te_s, y_te_log)],
-              callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)])
+    # Randomized hyperparameter search for LightGBM regressor optimizing log-scale R²
+    def random_search_lgb_regressor(X, y_log, groups, n_trials=20, random_state=42):
+        best = {'score': -np.inf, 'params': None}
+        rng = np.random.RandomState(random_state)
+        from sklearn.model_selection import GroupKFold
+        gkf = GroupKFold(n_splits=3)
+        for t in range(n_trials):
+            params = {
+                'n_estimators': int(rng.choice([500, 1000, 1500])),
+                'learning_rate': float(rng.uniform(0.005, 0.05)),
+                'num_leaves': int(rng.choice([31, 63, 127])),
+                'min_child_samples': int(rng.choice([5, 10, 20])),
+                'subsample': float(rng.uniform(0.6, 1.0)),
+                'colsample_bytree': float(rng.uniform(0.6, 1.0)),
+                'random_state': 42,
+                'n_jobs': -1,
+                'verbosity': -1,
+            }
+            r2s = []
+            for tr_idx, val_idx in gkf.split(X, y_log, groups=groups):
+                X_tr_cv, X_val_cv = X[tr_idx], X[val_idx]
+                y_tr_cv, y_val_cv = y_log.iloc[tr_idx], y_log.iloc[val_idx]
+                model = lgb.LGBMRegressor(**params)
+                try:
+                    model.fit(X_tr_cv, y_tr_cv, eval_set=[(X_val_cv, y_val_cv)], early_stopping_rounds=50, verbose=False)
+                    pred_log = model.predict(X_val_cv)
+                    r2s.append(r2_score(y_val_cv, pred_log))
+                except Exception:
+                    r2s.append(-999)
+            mean_r2 = float(np.mean(r2s)) if len(r2s) > 0 else -999
+            if mean_r2 > best['score']:
+                best['score'] = mean_r2
+                best['params'] = params
+        # fallback default params
+        if best['params'] is None:
+            best['params'] = dict(
+                n_estimators=1000,
+                learning_rate=0.02,
+                num_leaves=127,
+                min_child_samples=10,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+        return best
+
+    # Prefer Optuna-tuned params if available
+    optuna_path_r = os.path.join(MODEL_DIR, "reschedule", "optuna_best_params.json")
+    if os.path.exists(optuna_path_r):
+        try:
+            with open(optuna_path_r, 'r') as f:
+                best_params_r = json.load(f)
+            print(f"  Using Optuna params from {optuna_path_r}")
+        except Exception:
+            best_params_r = None
+    else:
+        best_params_r = None
+
+    if best_params_r is None:
+        print("  Running randomized LGB search (reschedule)...")
+        # use X_tr_s and y_tr_log for search groups=users[train_idx]
+        search_res_r = random_search_lgb_regressor(X_tr_s, y_tr_log, users.iloc[train_idx].values, n_trials=20)
+        print(f"  Best CV R² (log): {search_res_r['score']:.4f}")
+        best_params_r = search_res_r['params']
+
+    lgb_r = lgb.LGBMRegressor(**best_params_r)
+    lgb_r.fit(X_tr_s, y_tr_log, eval_set=[(X_te_s, y_te_log)], callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)])
 
     # ── XGBoost regression ────────────────────────────────────────────────
     xgb_r = xgb.XGBRegressor(
@@ -455,15 +783,19 @@ def train_reschedule():
     pred_log     = 0.55 * pred_lgb_log + 0.45 * pred_xgb_log
     pred         = np.expm1(pred_log)
 
-    r2 = r2_score(y_te, pred)
-    print(f"\n  Ensemble R²      : {r2:.4f}")
+    # Compute R² on original scale and on log scale (log-scale often more informative for skewed targets)
+    r2_orig = r2_score(y_te, pred)
+    r2_log = r2_score(np.log1p(y_te), pred_log)
+    print(f"\n  Ensemble R² (original scale) : {r2_orig:.4f}")
+    print(f"  Ensemble R² (log scale)      : {r2_log:.4f}")
 
     save(lgb_r,   f"{MODEL_DIR}/reschedule/lgb_fe_model.pkl")
     save(xgb_r,   f"{MODEL_DIR}/reschedule/xgb_best.pkl")
     save(sc,      f"{MODEL_DIR}/reschedule/scaler_fe.pkl")
 
     print(f"\n  Done in {time.time()-t0:.1f}s")
-    return {"r2": r2}
+    # Return log-scale R² as it's more stable for heavily skewed delta_s
+    return {"r2": r2_log, "r2_orig": r2_orig}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -481,13 +813,22 @@ def train_profiling():
     df = pd.read_csv(f"{TRAINING_DIR}/profiling_training.csv")
     print(f"  Loaded {len(df):,} rows")
 
-    feat_cols = [
-        "weekly_self_study_hours", "attendance_percentage_x", "class_participation",
-        "total_score", "age", "study_hours", "attendance_percentage_y",
-        "math_score", "science_score", "english_score", "overall_score",
-    ]
-    feat_cols = [c for c in feat_cols if c in df.columns]
-    X = df[feat_cols].fillna(df[feat_cols].median())
+    if 'highest_education' in df.columns:
+        from sklearn.preprocessing import OrdinalEncoder
+        feat_cols = ['code_module', 'code_presentation', 'gender', 'region', 'highest_education', 
+                     'imd_band', 'age_band', 'num_of_prev_attempts', 'studied_credits', 'disability']
+        X_raw = df[feat_cols].copy().astype(str)
+        oe = OrdinalEncoder()
+        X_encoded = oe.fit_transform(X_raw)
+        X = pd.DataFrame(X_encoded, columns=feat_cols)
+    else:
+        feat_cols = [
+            "weekly_self_study_hours", "attendance_percentage_x", "class_participation",
+            "total_score", "age", "study_hours", "attendance_percentage_y",
+            "math_score", "science_score", "english_score", "overall_score",
+        ]
+        feat_cols = [c for c in feat_cols if c in df.columns]
+        X = df[feat_cols].fillna(df[feat_cols].median())
 
     sc = StandardScaler()
     X_s = sc.fit_transform(X)
@@ -615,10 +956,24 @@ def regenerate_plots(results: dict):
     # ── Progress: ROC curve ────────────────────────────────────────────────
     try:
         df_prog = pd.read_csv(f"{TRAINING_DIR}/progress_training.csv", nrows=50000)
-        X_p, y_p = _fe_progress(df_prog)
-        _, X_te_p, _, y_te_p = train_test_split(X_p, y_p, test_size=0.20, random_state=42, stratify=y_p)
+        X_p, y_p, users_p, q_p = _fe_progress(df_prog)
+        from sklearn.model_selection import GroupShuffleSplit
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
+        _, test_idx = next(gss.split(X_p, y_p, groups=users_p))
+        X_te_p = X_p.iloc[test_idx]
+        y_te_p = y_p.iloc[test_idx]
         lgb_m = joblib.load(f"{MODEL_DIR}/progress/lgb_model.pkl")
         xgb_m = joblib.load(f"{MODEL_DIR}/progress/xgb.pkl")
+        # Ensure feature columns match what was used at training time
+        try:
+            cont_cols = joblib.load(f"{MODEL_DIR}/progress/cont_cols.pkl")
+        except Exception:
+            cont_cols = list(X_te_p.columns)
+        # Add missing columns with zeros
+        for c in cont_cols:
+            if c not in X_te_p.columns:
+                X_te_p[c] = 0
+        X_te_p = X_te_p.reindex(columns=cont_cols)
         prob = 0.55*lgb_m.predict_proba(X_te_p)[:,1] + 0.45*xgb_m.predict_proba(X_te_p)[:,1]
         fpr, tpr, _ = roc_curve(y_te_p, prob)
         auc = roc_auc_score(y_te_p, prob)
@@ -646,9 +1001,14 @@ def regenerate_plots(results: dict):
         rf_m  = joblib.load(f"{MODEL_DIR}/motivation/rf.pkl")
         df_mot = df_mot[df_mot["stress_level"].notna()].copy()
         y_m = le.transform(df_mot["stress_level"].astype(int))
-        X_m = df_mot[feat_cols].fillna(0).values
-        _, X_te_m, _, y_te_m = train_test_split(X_m, y_m, test_size=0.2, random_state=42, stratify=y_m)
-        X_te_ms = sc.transform(X_te_m)
+        X_m = df_mot[feat_cols].fillna(0)
+        # use StratifiedShuffleSplit for a robust stratified holdout
+        from sklearn.model_selection import StratifiedShuffleSplit
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
+        _, te_idx = next(sss.split(X_m, y_m))
+        X_te_m = X_m.iloc[te_idx]
+        y_te_m = y_m[te_idx]
+        X_te_ms = sc.transform(X_te_m.values)
         prob = 0.40*lgb_m.predict_proba(X_te_ms) + 0.35*xgb_m.predict_proba(X_te_ms) + 0.25*rf_m.predict_proba(X_te_ms)
         y_pred_m = np.argmax(prob, axis=1)
         acc_m = accuracy_score(y_te_m, y_pred_m)

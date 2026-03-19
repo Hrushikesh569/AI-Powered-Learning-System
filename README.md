@@ -541,3 +541,12 @@ MIT — see [LICENSE](LICENSE).
 Built for the **AI-Powered Personalized Learning System** project.  
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+
+
+**Machine Learning Metrics**
+
+**Automated Retrain Metrics (2026-03-19T17:07:07.295358Z)**
+- **progress**: {'auc': 0.8248872149193958, 'accuracy': 0.7615955875966299, 'threshold': np.float64(0.5000000000000002)}
+- **reschedule**: {'error': "'NaTType' object has no attribute 'isna'"}
+- **motivation**: {'accuracy': 0.8772727272727273, 'f1_weighted': 0.8771758244006868}
+- **profiling**: {'error': 'Input X contains NaN.\nPCA does not accept missing values encoded as NaN natively. For supervised learning, you might want to consider sklearn.ensemble.HistGradientBoostingClassifier and Regressor which accept missing values encoded as NaNs natively. Alternatively, it is possible to preprocess the data, for instance by using an imputer transformer in a pipeline or drop samples with missing values. See https://scikit-learn.org/stable/modules/impute.html You can find a list of all estimators that handle NaN values at the following page: https://scikit-learn.org/stable/modules/impute.html#estimators-that-handle-nan-values'}

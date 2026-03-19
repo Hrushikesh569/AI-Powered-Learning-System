@@ -1,27 +1,84 @@
-import { useState } from 'react';
+
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import DashboardLayout from '../layouts/DashboardLayout';
-import { userProfile } from '../data/mockData';
+import { agentAPI, clearAuthToken } from '../api';
 import { User, Mail, Clock, Target, Award, Calendar, LogOut } from 'lucide-react';
+
 
 const Profile = () => {
     const navigate = useNavigate();
-    const [formData, setFormData] = useState({
-        name: userProfile.name,
-        email: userProfile.email,
-        studyHoursPerDay: userProfile.studyHoursPerDay,
-        learningGoal: userProfile.learningGoal,
-    });
+    const [formData, setFormData] = useState({ name: '', email: '', studyHoursPerDay: 0, learningGoal: '' });
+    const [userProfile, setUserProfile] = useState({ name: '', email: '', learnerType: '', joinedDate: '', totalStudyHours: 0, completedSessions: 0 });
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
 
-    const handleSubmit = (e) => {
+    useEffect(() => {
+        const fetchProfile = async () => {
+            setLoading(true);
+            setError('');
+            try {
+                const res = await agentAPI.getMe();
+                setUserProfile(res);
+                setFormData({
+                    name: res.name || '',
+                    email: res.email || '',
+                    studyHoursPerDay: res.studyHoursPerDay || 0,
+                    learningGoal: res.learningGoal || '',
+                });
+            } catch (err) {
+                setError('Failed to load profile.');
+            } finally {
+                setLoading(false);
+            }
+        };
+        fetchProfile();
+    }, []);
+
+    const [saving, setSaving] = useState(false);
+    const [saveMsg, setSaveMsg] = useState('');
+
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        alert('Profile updated successfully!');
+        setSaving(true);
+        setSaveMsg('');
+        try {
+            await agentAPI.updateMe({
+                name: formData.name,
+                studyHoursPerDay: Number(formData.studyHoursPerDay),
+                learningGoal: formData.learningGoal,
+            });
+            setUserProfile((p) => ({ ...p, ...formData }));
+            setSaveMsg('Profile saved successfully!');
+        } catch (err) {
+            setSaveMsg('Failed to save profile. Please try again.');
+        } finally {
+            setSaving(false);
+        }
     };
 
     const handleLogout = () => {
+        clearAuthToken();
+        // Clear all user-specific localStorage data
+        localStorage.removeItem('userName');
+        localStorage.removeItem('userEmail');
+        localStorage.removeItem('taskStatuses');
+        localStorage.removeItem('preferredTopics');
+        localStorage.removeItem('hiddenSubjects');
+        localStorage.removeItem('generatedSchedule');
+        localStorage.removeItem('learningPreferences');
+        localStorage.removeItem('completedSubjects');
+        localStorage.removeItem('completedTopics');
+        localStorage.removeItem('missedTopics');
+        localStorage.removeItem('activityMap');
+        localStorage.removeItem('scheduleOverrides');
+        localStorage.removeItem('preferredSubjectToday');
         navigate('/');
     };
+
+    if (loading) return <div className="text-center text-primary-600 mt-8">Loading profile...</div>;
+    if (error) return <div className="text-center text-red-600 mt-8">{error}</div>;
 
     return (
         <DashboardLayout>
@@ -41,7 +98,11 @@ const Profile = () => {
                         <div className="card text-center">
                             <div className="w-24 h-24 bg-gradient-to-br from-primary-500 to-blue-600 rounded-full flex items-center justify-center mx-auto mb-4">
                                 <span className="text-3xl font-bold text-white">
-                                    {userProfile.name.split(' ').map((n) => n[0]).join('')}
+                                    {(userProfile.name || 'User')
+                                        .split(' ')
+                                        .filter(Boolean)
+                                        .map((n) => n[0])
+                                        .join('')}
                                 </span>
                             </div>
                             <h2 className="text-xl font-bold text-gray-800">{userProfile.name}</h2>
@@ -55,10 +116,16 @@ const Profile = () => {
                         <div className="card">
                             <h3 className="font-semibold text-gray-800 mb-4">Statistics</h3>
                             <div className="space-y-3">
-                                <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between">
                                     <span className="text-sm text-gray-600">Member Since</span>
                                     <span className="font-semibold text-gray-800">
-                                        {new Date(userProfile.joinedDate).toLocaleDateString()}
+                                        {userProfile.joinedDate 
+                                            ? new Date(userProfile.joinedDate).toLocaleDateString('en-US', { 
+                                                year: 'numeric', 
+                                                month: 'long', 
+                                                day: 'numeric' 
+                                              })
+                                            : 'Today'}
                                     </span>
                                 </div>
                                 <div className="flex items-center justify-between">
@@ -139,13 +206,18 @@ const Profile = () => {
                                 </div>
 
                                 <div className="flex space-x-4">
-                                    <button type="submit" className="btn-primary flex-1">
-                                        Save Changes
+                                    <button type="submit" className="btn-primary flex-1" disabled={saving}>
+                                        {saving ? 'Saving...' : 'Save Changes'}
                                     </button>
                                     <button type="button" className="btn-secondary flex-1">
                                         Cancel
                                     </button>
                                 </div>
+                                {saveMsg && (
+                                    <p className={`text-sm mt-2 ${
+                                        saveMsg.includes('Failed') ? 'text-red-600' : 'text-green-600'
+                                    }`}>{saveMsg}</p>
+                                )}
                             </form>
                         </div>
 
