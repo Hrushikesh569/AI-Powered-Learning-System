@@ -1,0 +1,35 @@
+fastapi
+uvicorn[standard]
+SQLAlchemy[asyncio]
+asyncpg
+aiosqlite
+alembic
+psycopg2-binary
+redis
+celery[redis]
+python-jose[cryptography]
+bcrypt
+pydantic[email]
+pydantic-settings
+python-dotenv
+
+joblib
+scikit-learn
+lightgbm
+xgboost
+pandas
+numpy
+shap
+httpx
+# PDF/PPT extraction (PyMuPDF is far superior to pypdf for complex layouts)
+PyMuPDF
+python-pptx
+# OCR for scanned PDFs and image-based files (requires tesseract-ocr system package)
+pytesseract
+Pillow
+pdf2image
+python-multipart
+matplotlib
+seaborn
+plotly
+mlflow

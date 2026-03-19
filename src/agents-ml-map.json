@@ -1,0 +1,30 @@
+{
+  "UserProfilingAgent": {
+    "ml": ["KMeans", "GaussianMixture"],
+    "api": "/profiling/label"
+  },
+  "LearningScheduleGeneratorAgent": {
+    "ml": ["DQN", "PPO"],
+    "api": "/schedule/generate"
+  },
+  "ProgressMonitoringAgent": {
+    "ml": ["RandomForestRegressor", "XGBoost", "IsolationForest"],
+    "api": ["/progress/log", "/progress/predict"]
+  },
+  "AdaptiveReschedulingAgent": {
+    "ml": ["DQN", "PPO"],
+    "api": "/schedule/generate"
+  },
+  "FeedbackMotivationAgent": {
+    "ml": ["LogisticRegression", "RandomForestClassifier", "XGBoostClassifier"],
+    "api": ["/motivation/log", "/motivation/classify"]
+  },
+  "CommunityInteractionAgent": {
+    "ml": ["Embedding", "CosineSimilarity", "GNN"],
+    "api": "/community/peers"
+  },
+  "GroupMatchingAgent": {
+    "ml": ["HierarchicalClustering", "KMeans", "ConstraintMatching"],
+    "api": "/group/match"
+  }
+}

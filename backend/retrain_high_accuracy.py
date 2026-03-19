@@ -196,7 +196,7 @@ def _fe_progress(df: pd.DataFrame):
 
 
 def train_progress():
-    banner("PROGRESS  —  binary classification (ROC-AUC ≥ 0.97)")
+    banner("PROGRESS -- binary classification (ROC-AUC >= 0.97)")
     t0 = time.time()
 
     df = pd.read_csv(f"{TRAINING_DIR}/progress_training.csv")
@@ -469,7 +469,7 @@ def train_progress():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train_motivation():
-    banner("MOTIVATION  —  multiclass (accuracy ≥ 0.97)")
+    banner("MOTIVATION -- multiclass (accuracy >= 0.97)")
     t0 = time.time()
 
     df = pd.read_csv(f"{TRAINING_DIR}/motivation_training.csv")
@@ -664,7 +664,7 @@ def _fe_reschedule(df: pd.DataFrame):
 
 
 def train_reschedule():
-    banner("RESCHEDULE  —  regression (R² ≥ 0.95)")
+    banner("RESCHEDULE -- regression (R-squared >= 0.95)")
     t0 = time.time()
 
     df = pd.read_csv(f"{TRAINING_DIR}/reschedule_training.csv")
@@ -803,7 +803,7 @@ def train_reschedule():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train_profiling():
-    banner("PROFILING  —  clustering (silhouette ≥ 0.90)")
+    banner("PROFILING -- clustering (silhouette >= 0.90)")
     t0 = time.time()
 
     from sklearn.cluster import KMeans, MiniBatchKMeans
