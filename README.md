@@ -29,13 +29,13 @@ A full-stack, production-grade AI learning platform that combines **LLM-powered 
 
 ## 📈 Performance Metrics
 
-### ML Agent Scores (Latest Run - March 2026)
+### ML Agent Scores (Latest Run - March 19, 2026)
 | Agent | Task | Measured Performance | Status |
 |-------|------|-------------------|--------|
-| **Progress** | Correctness prediction | AUC = 1.00 | ✅ |
-| **Motivation** | Stress classification | Accuracy = 0.9727 | ✅ |
-| **Reschedule** | Time-delta regression | R² = 0.92 | ✅ |
-| **Profiling** | Learner clustering | Silhouette = 0.1968 | ⚠️ Needs Tuning |
+| **Progress** | Correctness prediction | AUC = 0.8249 | ✅ |
+| **Motivation** | Stress classification | Accuracy = 0.8773 | ✅ |
+| **Reschedule** | Time-delta regression | 🔧 In Development | ⚠️ Error |
+| **Profiling** | Learner clustering | 🔧 In Development | ⚠️ Error |
 
 ### System Metrics
 - **API Response Time:** <200ms (p95)
