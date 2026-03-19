@@ -1,0 +1,44 @@
+# Training data & datasets — NOT needed at runtime
+data/
+generated/
+processed/
+final_training/
+backend/data/
+
+# ML training scripts — only app/ml/ (trained pkls) is needed
+ml/
+
+# Test files
+tests/
+backend/
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+
+# Jupyter notebooks
+**/*.ipynb
+**/.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / OS
+.git/
+.gitignore
+.env*
+!.env.example
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs / README only (not needed at runtime)
+README*.md
+docs/

@@ -1,0 +1,153 @@
+{
+  "method": "permutation",
+  "top_features": [
+    {
+      "feature": "diff_gap",
+      "perm_importance": 0.1247142857142857
+    },
+    {
+      "feature": "attempt_n",
+      "perm_importance": 0.027249999999999986
+    },
+    {
+      "feature": "difficulty",
+      "perm_importance": 0.01763095238095236
+    },
+    {
+      "feature": "log_time_since_q",
+      "perm_importance": 0.013011904761904747
+    },
+    {
+      "feature": "u_cum_acc",
+      "perm_importance": 0.005071428571428571
+    },
+    {
+      "feature": "u_roll20",
+      "perm_importance": 0.0024642857142856966
+    },
+    {
+      "feature": "u_total",
+      "perm_importance": 0.0023333333333333097
+    },
+    {
+      "feature": "q_cum_acc",
+      "perm_importance": 0.0017142857142857016
+    },
+    {
+      "feature": "u_freq",
+      "perm_importance": 0.0016428571428571237
+    },
+    {
+      "feature": "u_ewm10",
+      "perm_importance": 0.0014880952380952217
+    },
+    {
+      "feature": "u_ewm5",
+      "perm_importance": 0.0013333333333333196
+    },
+    {
+      "feature": "u_roll10",
+      "perm_importance": 0.000928571428571412
+    },
+    {
+      "feature": "question_cat",
+      "perm_importance": 0.0007976190476190137
+    },
+    {
+      "feature": "irt_score",
+      "perm_importance": 0.0007857142857142674
+    },
+    {
+      "feature": "q_freq",
+      "perm_importance": 0.0006309523809523542
+    },
+    {
+      "feature": "ability_delta",
+      "perm_importance": 0.00040476190476188554
+    },
+    {
+      "feature": "dow",
+      "perm_importance": 0.0003809523809523485
+    },
+    {
+      "feature": "prev_correct",
+      "perm_importance": 0.00033333333333331885
+    },
+    {
+      "feature": "in_sess_pos",
+      "perm_importance": 0.00033333333333330774
+    },
+    {
+      "feature": "q_hardness",
+      "perm_importance": 0.00029761904761903545
+    },
+    {
+      "feature": "u_ewm3",
+      "perm_importance": 0.0002619047619047299
+    },
+    {
+      "feature": "q_total",
+      "perm_importance": 0.00019047619047616316
+    },
+    {
+      "feature": "month",
+      "perm_importance": 0.0001547619047618909
+    },
+    {
+      "feature": "u_trend",
+      "perm_importance": 0.0001547619047618909
+    },
+    {
+      "feature": "user_cat",
+      "perm_importance": 0.00014285714285712238
+    },
+    {
+      "feature": "u_roll3",
+      "perm_importance": 7.142857142854453e-05
+    },
+    {
+      "feature": "u_diff_acc",
+      "perm_importance": 2.380952380949264e-05
+    },
+    {
+      "feature": "dataset_cat",
+      "perm_importance": 0.0
+    },
+    {
+      "feature": "is_repeat",
+      "perm_importance": 0.0
+    },
+    {
+      "feature": "log_sess_pos",
+      "perm_importance": 0.0
+    },
+    {
+      "feature": "q_target_enc",
+      "perm_importance": 0.0
+    },
+    {
+      "feature": "time_bucket",
+      "perm_importance": 0.0
+    },
+    {
+      "feature": "u_target_enc",
+      "perm_importance": 0.0
+    },
+    {
+      "feature": "log_time_since_first_q",
+      "perm_importance": -4.7619047619074095e-05
+    },
+    {
+      "feature": "hour",
+      "perm_importance": -0.0001547619047619353
+    },
+    {
+      "feature": "u_streak",
+      "perm_importance": -0.0003214285714285836
+    },
+    {
+      "feature": "u_roll5",
+      "perm_importance": -0.0009285714285714563
+    }
+  ]
+}

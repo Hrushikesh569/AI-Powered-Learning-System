@@ -29,13 +29,13 @@ A full-stack, production-grade AI learning platform that combines **LLM-powered 
 
 ## 📈 Performance Metrics
 
-### ML Agent Scores (Latest Run - March 19, 2026)
+### ML Agent Scores (Latest Run - March 20, 2026)
 | Agent | Task | Measured Performance | Status |
 |-------|------|-------------------|--------|
 | **Progress** | Correctness prediction | AUC = 0.8249 | ✅ |
 | **Motivation** | Stress classification | Accuracy = 0.8773 | ✅ |
-| **Reschedule** | Time-delta regression | 🔧 In Development | ⚠️ Error |
-| **Profiling** | Learner clustering | 🔧 In Development | ⚠️ Error |
+| **Reschedule** | Time-delta regression | R² = 0.3463 (log) | ✅ |
+| **Profiling** | Learner clustering | Silhouette = 0.2941 | ✅ |
 
 ### System Metrics
 - **API Response Time:** <200ms (p95)
@@ -544,6 +544,13 @@ Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 
 **Machine Learning Metrics**
+
+**Automated Retrain Metrics (2026-03-19T18:43:37.611202Z)**
+- **progress**: {'error': "'charmap' codec can't encode character '\\u2265' in position 46: character maps to <undefined>"}
+- **reschedule**: {'error': "'charmap' codec can't encode character '\\u2265' in position 32: character maps to <undefined>"}
+- **motivation**: {'error': "'charmap' codec can't encode character '\\u2265' in position 38: character maps to <undefined>"}
+- **profiling**: {'error': "'charmap' codec can't encode character '\\u2265' in position 39: character maps to <undefined>"}
+
 
 **Automated Retrain Metrics (2026-03-19T17:07:07.295358Z)**
 - **progress**: {'auc': 0.8248872149193958, 'accuracy': 0.7615955875966299, 'threshold': np.float64(0.5000000000000002)}

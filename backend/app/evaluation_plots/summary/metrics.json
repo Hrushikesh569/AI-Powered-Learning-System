@@ -1,0 +1,21 @@
+{
+  "progress": {
+    "auc": 0.8249,
+    "accuracy": 0.7616,
+    "threshold": 0.5
+  },
+  "motivation": {
+    "accuracy": 0.8773,
+    "f1_weighted": 0.8772
+  },
+  "reschedule": {
+    "r2": 0.3463,
+    "r2_orig": -0.0325
+  },
+  "profiling": {
+    "silhouette": 0.2941,
+    "n_clusters": 4
+  },
+  "timestamp": "2026-03-20T10:15:00Z",
+  "elapsed_s": 3600.0
+}

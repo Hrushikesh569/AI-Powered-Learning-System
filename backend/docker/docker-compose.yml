@@ -1,0 +1,111 @@
+version: '3.8'
+
+x-common-env: &common-env
+  POSTGRES_URL: postgresql+asyncpg://user:pass@db:5432/ai_learning
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  SECRET_KEY: ${SECRET_KEY:-changeme-set-in-production-32chars!}
+  ML_MODEL_REGISTRY: mlruns
+  # Ollama RAG — points to the local ollama sidecar
+  OLLAMA_URL: http://ollama:11434
+  OLLAMA_EMBED_MODEL: nomic-embed-text
+  OLLAMA_GEN_MODEL: llama3.2:1b
+
+x-app-base: &app-base
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  backend:
+    <<: *app-base
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  celery-worker:
+    <<: *app-base
+    command: celery -A app.core.celery_app.celery worker --loglevel=info --concurrency=2
+    environment:
+      <<: *common-env
+
+  celery-beat:
+    <<: *app-base
+    command: celery -A app.core.celery_app.celery beat --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      celery-worker:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: ai_learning
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ai_learning"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Ollama LLM server ─────────────────────────────────────────────────────
+  # Runs open-source models locally — no API key, no data leaves the machine.
+  # GPU: add `deploy.resources.reservations.devices` (NVIDIA) if available.
+  # Models are persisted in the ollama_data volume so they survive restarts.
+  #
+  # One-time model pull (run after first `docker-compose up`):
+  #   docker exec docker-ollama-1 ollama pull nomic-embed-text
+  #   docker exec docker-ollama-1 ollama pull llama3.2:1b
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pgdata:
+  ollama_data:

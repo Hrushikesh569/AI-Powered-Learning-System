@@ -1,0 +1,29 @@
+name: Evaluation Smoke Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  evaluation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: Run evaluation runner smoke test
+        working-directory: .
+        run: |
+          python backend/ml/evaluation/runner.py --agent schedule --runs 5 --state-dim 4
+      - name: Run tests
+        run: |
+          pip install pytest
+          pytest -q backend/tests
