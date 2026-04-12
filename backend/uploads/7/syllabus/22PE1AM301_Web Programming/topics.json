@@ -1,0 +1,94 @@
+{
+  "subject_name": "Web Programming",
+  "subject_code": "22PE1AM301",
+  "overview": "Course materials for Web Programming.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Internet Fundamentals and HTML: World Wide Web and Internet",
+        "Web Browsers",
+        "Web Servers with examples",
+        "URL",
+        "MIME",
+        "List",
+        "Tables",
+        "Images",
+        "Forms",
+        "Frames Cascading Style Sheets: Introduction",
+        "CSS overview",
+        "Types of CSS",
+        "CSS Rules",
+        "Class and ID selectors",
+        "CSS properties",
+        "Writing Internal and External CSS"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Client-side Scripting: Introduction to Javascript",
+        "Javascript language",
+        "Declaring variables",
+        "Scope of variables",
+        "Loops",
+        "Functions",
+        "Event handlers (Keyboard Events",
+        "Mouse events",
+        "Form Events",
+        "Window events)",
+        "Event Listeners",
+        "Document Object Model",
+        "Form validation",
+        "Callbacks and the callback hell",
+        "Closure and Scopes"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Node.js: Introduction",
+        "Features",
+        "Advantages of Node.js",
+        "Node.js vs. Other Technologies",
+        "Setting up the development environment",
+        "Installing Node.js",
+        "Running your first",
+        "Node.js program",
+        "Loops",
+        "Working with npm (Node package manage and Modules",
+        "Call backs",
+        "Error Handing",
+        "Working with Express Js"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "MongoDB: Overview of NoSQL Database",
+        "Mongo DB",
+        "Its data types",
+        "And how it compares to RDBMS",
+        "How to install Mongo DB and configure its setup",
+        "Creating database and tables",
+        "Mango DB data Modeling",
+        "CRUD operations"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "RestAPI and Docker: Introduction to REST",
+        "Creating RESTful APIs with Express.js",
+        "Handling HTTP methods and status codes",
+        "Deploying Node.js applications",
+        "Docker and Containerization with Docker"
+      ]
+    }
+  ]
+}

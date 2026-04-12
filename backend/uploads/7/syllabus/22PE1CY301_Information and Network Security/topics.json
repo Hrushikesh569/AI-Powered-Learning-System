@@ -1,0 +1,81 @@
+{
+  "subject_name": "Information and Network Security",
+  "subject_code": "22PE1CY301",
+  "overview": "Course materials for Information and Network Security.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Introduction: Overview and History of Cryptography",
+        "Public and Private-key Cryptography",
+        "One-Way Functions",
+        "Block Cipher Operations",
+        "DES",
+        "Triple DES",
+        "AES. Stream Ciphers- Definition",
+        "RC4",
+        "RC5"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Asymmetric Key Ciphers: Practical Aspects of Public-Key Cryptography",
+        "RSA Cryptosystem",
+        "Elgamal Cryptosystem",
+        "Elliptic Curve Cryptosystems",
+        "Merkle-Hellman Knapsack. Data Integrity: Introduction",
+        "Hash Functions-Definition",
+        "SHA-512",
+        "Message Authentication Code: Authentication requirements",
+        "HMAC",
+        "CMAC",
+        "Digital signatures",
+        "Elgamal Digital Signature Scheme"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Key Management and Distribution: Symmetric Key Distribution Using Symmetric & Asymmetric Encryption",
+        "Distribution of Public Keys",
+        "Kerberos",
+        "X.509 Authentication Service",
+        "Public",
+        "Key Infrastructure Advanced Topics: Pseudorandom Generators",
+        "Zero-knowledge Proofs"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Transport-level Security: Web security considerations",
+        "Secure Socket Layer and Transport Layer Security",
+        "Secure Shell (SSH) Wireless Network Security: Wireless Security",
+        "Mobile Device Security",
+        "IEEE 802.11 Wireless LAN",
+        "IEEE 802.11i Wireless LAN Security"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "E-Mail Security: Pretty Good Privacy",
+        "S/MIME IP Security: IP Security overview",
+        "IP Security architecture",
+        "Authentication Header",
+        "Encapsulating security payload",
+        "Combining security associations",
+        "Internet Key Exchange. Case Studies on Cryptography and Security: Secure Multiparty Calculation",
+        "Virtual Elections",
+        "Single Sign On",
+        "Secure Inter-branch Payment Transactions"
+      ]
+    }
+  ]
+}

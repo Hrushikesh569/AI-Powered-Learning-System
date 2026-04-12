@@ -1,0 +1,74 @@
+{
+  "subject_name": "Machine Learning",
+  "subject_code": "22PC1AM302",
+  "overview": "Course materials for Machine Learning.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Learning Paradigms",
+        "PAC learning",
+        "Version Spaces",
+        "Role of Machine Learning in Artificial Intelligence applications"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Supervised Learning",
+        "I: Linear and Non-Linear examples",
+        "Multi–Class & Multi-Label classification",
+        "Linear Regression",
+        "Multiple Linear Regression",
+        "Naïve Bayes Classifier",
+        "Decision Trees",
+        "ID3",
+        "CART",
+        "Error bounds"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Supervised Learning",
+        "II: K-NN classifier",
+        "Logistic regression",
+        "Perceptron",
+        "Single layer & Multi-layer",
+        "Support Vector Machines",
+        "Linear & Non-linear",
+        "Metrics & Error Correction"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Unsupervised Learning: Clustering basics (Partitioned",
+        "Hierarchical and Density based) -Means clustering",
+        "K- Mode clustering",
+        "Self organizing maps",
+        "Expectation maximization",
+        "Principal Component Analysis",
+        "Kernel PCA",
+        "TSNE (t-distributed stochastic neighbour embedding)",
+        "Metrics & Error Correction"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Ensemble Learning: Bias",
+        "Variance Trade-off",
+        "Bagging and Boosting (Random forests",
+        "Ad boost",
+        "XG boost inclusive)",
+        "Metrics & Error Correction"
+      ]
+    }
+  ]
+}

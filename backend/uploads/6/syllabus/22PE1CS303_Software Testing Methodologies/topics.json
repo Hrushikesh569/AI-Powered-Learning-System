@@ -1,0 +1,103 @@
+{
+  "subject_name": "Software Testing Methodologies",
+  "subject_code": "22PE1CS303",
+  "overview": "Course materials for Software Testing Methodologies.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Principles of Testing: Software Development Life Cycle Models",
+        "Phases of Software Project",
+        "Quality",
+        "Quality Assurance and Quality Control",
+        "Testing",
+        "Verification and Validation",
+        "Process Model to Represent Different Phases",
+        "White Box Testing: Static Testing",
+        "Structural Testing",
+        "Challenges",
+        "Black Box Testing"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Integration Testing: Integration Testing as a Type of Testing",
+        "Integration Testing as a Phase of Testing",
+        "Scenario Testing",
+        "Defect Bash. System and Acceptance Testing: Overview",
+        "Functional Versus Non-Functional",
+        "Functional System Testing & Non-Functional",
+        "Acceptance Testing. Performance Testing: Introduction",
+        "Factors",
+        "Methodology",
+        "Tools & Process. Regression Testing: Introduction –Types",
+        "When to do Regression Testing",
+        "How to do Regression Testing",
+        "Best Practices in Regression Testing"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Ad hoc Testing: Overview",
+        "Buddy Testing",
+        "Pair Testing",
+        "Exploratory Testing",
+        "Iterative",
+        "Agile and Extreme Testing",
+        "Defect Seeding. Usability and Accessibility Testing: Approach to Usability",
+        "When to do Usability",
+        "How to achieve Usability",
+        "Quality Factors for Usability",
+        "Aesthetics Testing",
+        "Accessibility Testing",
+        "Tools for Usability",
+        "Usability Lab Setup",
+        "Test Roles for Usability"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Organization Structures for Testing Teams: Dimensions of Organization Structures",
+        "Structures in Single-Product Companies",
+        "Multi-product Companies",
+        "Effects of Globalization and Geographically Distributed Teams on Product Testing",
+        "Testing Services Organizations",
+        "Success Factors for Testing Organizations. Test Planning",
+        "Management",
+        "Execution and Reporting: Introduction",
+        "Planning",
+        "Process",
+        "Reporting",
+        "Best Practices"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Software Test Automation: Terms used in Automation",
+        "Skills needed for Automation",
+        "What to Automate",
+        "Scope of Automation",
+        "Design and Architecture for Automation",
+        "Generic Requirements for Test Tools",
+        "Process Model for Automation",
+        "Selecting a Test Tool",
+        "Automation for Extreme Programming Model",
+        "Challenges. Test Metrics and Measurements: Metrics & Measurements",
+        "Types",
+        "Project",
+        "Progress",
+        "Productivity",
+        "Re"
+      ]
+    }
+  ]
+}

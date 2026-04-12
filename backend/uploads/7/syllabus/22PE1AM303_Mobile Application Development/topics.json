@@ -1,0 +1,105 @@
+{
+  "subject_name": "Mobile Application Development",
+  "subject_code": "22PE1AM303",
+  "overview": "Course materials for Mobile Application Development.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Introduction to Mobile Communications: Introduction to Mobile Computing",
+        "Novel applications",
+        "Limitations and Architecture",
+        "Generations of mobile communication  technologies. GSM: Mobile services",
+        "System architecture",
+        "Radio interface",
+        "Protocols",
+        "Localization and calling",
+        "Handover",
+        "Security",
+        "And New data services-GPRS"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Mobile Ad-Hoc Networks: Characteristics of Mobile Ad-hoc Networks",
+        "Applications of MANETs",
+        "Routing",
+        "Proactive protocol-DSDV",
+        "Reactive Routing Protocols",
+        "DSR",
+        "AODV",
+        "Hybrid routing –ZRP",
+        "Multicast Routing- ODMRP"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Android development framework",
+        "SDK features",
+        "Installing and running applications on Android Studio",
+        "Creating AVDs",
+        "Types of Android applications",
+        "Best practices in Android programming",
+        "Android tools Android application components",
+        "Android Manifest file",
+        "Externalizing resources like values",
+        "Themes",
+        "Layouts",
+        "Menus etc",
+        "Resources for different devices and languages",
+        "Runtime Configuration Changes Android Application Lifecycle",
+        "Activities",
+        "Activity lifecycle",
+        "Activity states",
+        "Monitoring state changes"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Android User Interface: Measurements",
+        "Device and pixel density independent measuring UNIT",
+        "S Layouts",
+        "Linear",
+        "Relative",
+        "Grid and Table Layouts User Interface (UI) Components",
+        "Editable and non-editable TextViews",
+        "Buttons",
+        "Radio and Toggle Buttons",
+        "Checkboxes",
+        "Spinners",
+        "Dialog and pickers Event Handling",
+        "Handling clicks or changes of various UI components Fragments",
+        "Creating fragments",
+        "Lifecycle of fragments",
+        "Fragment states",
+        "Adding fragments to Activity",
+        "Adding",
+        "Removing and replacing fragments with fragment transactions",
+        "Interfacing between fragments and Activities",
+        "Multi-screen Activities"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Database",
+        "Introduction to SQLite database",
+        "Creating and opening a database",
+        "Creating tables",
+        "Inserting retrieving and etindelg data",
+        "Registering Content Providers",
+        "Using content Providers (insert",
+        "Delete",
+        "Retrieve and update)"
+      ]
+    }
+  ]
+}
