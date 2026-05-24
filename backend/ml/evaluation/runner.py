@@ -3,35 +3,36 @@
 This is an example CLI you can run from the project root to evaluate an
 agent with synthetic inputs and see metrics/artifacts in MLflow (mlruns/).
 """
+
 import sys
 import os
 import argparse
 import numpy as np
 
 # Ensure backend package is importable when running from repo root
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from app.agents.schedule_agent import ScheduleAgent
-from app.agents.reschedule_agent import RescheduleAgent
-from ml.evaluation.evaluator import Evaluator
-from ml.evaluation import custom_metrics
-import mlflow
+from app.agents.schedule_agent import ScheduleAgent  # noqa: E402
+from app.agents.reschedule_agent import RescheduleAgent  # noqa: E402
+from ml.evaluation.evaluator import Evaluator  # noqa: E402
+from ml.evaluation import custom_metrics  # noqa: E402
+import mlflow  # noqa: E402
 
 
 def _ensure_local_file_tracking_store() -> None:
-    tracking_uri = os.getenv('MLFLOW_TRACKING_URI', '')
-    if not tracking_uri.startswith('file:'):
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "")
+    if not tracking_uri.startswith("file:"):
         return
 
     local_path = tracking_uri
-    if local_path.startswith('file:///'):
-        local_path = local_path[len('file:///'):]
-    elif local_path.startswith('file://'):
-        local_path = local_path[len('file://'):]
+    if local_path.startswith("file:///"):
+        local_path = local_path[len("file:///") :]
+    elif local_path.startswith("file://"):
+        local_path = local_path[len("file://") :]
     else:
-        local_path = local_path[len('file:'):]
+        local_path = local_path[len("file:") :]
 
     if local_path:
         os.makedirs(local_path, exist_ok=True)
@@ -43,26 +44,31 @@ def _dummy_reward(action):
     return -float(np.linalg.norm(a))
 
 
-def run_agent_evaluation(agent_name: str = 'schedule', runs: int = 50, state_dim: int = 8, experiment: str = 'agent-eval'):
-    """Run a synthetic evaluation for the named agent and log metrics/artifacts to MLflow.
+def run_agent_evaluation(
+    agent_name: str = "schedule",
+    runs: int = 50,
+    state_dim: int = 8,
+    experiment: str = "agent-eval",
+):
+    """Run a synthetic evaluation and log metrics/artifacts to MLflow.
 
     This uses random gaussian states and a simple reward function. It also calls
     any agent-specific metric function defined in `custom_metrics`.
     """
-    if agent_name == 'schedule':
+    if agent_name == "schedule":
         agent = ScheduleAgent()
-        method = 'generate'
-    elif agent_name == 'reschedule':
+        method = "generate"
+    elif agent_name == "reschedule":
         agent = RescheduleAgent()
-        method = 'adapt'
+        method = "adapt"
     else:
-        raise ValueError('Unsupported agent')
+        raise ValueError("Unsupported agent")
 
     states = []
     actions = []
     rewards = []
 
-    tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     if tracking_uri:
         _ensure_local_file_tracking_store()
         mlflow.set_tracking_uri(tracking_uri)
@@ -70,7 +76,7 @@ def run_agent_evaluation(agent_name: str = 'schedule', runs: int = 50, state_dim
     with mlflow.start_run(run_name=f"{agent_name}-synthetic"):
         for i in range(runs):
             state = np.random.randn(state_dim).tolist()
-            if method == 'generate':
+            if method == "generate":
                 action = agent.generate(state)
                 reward = _dummy_reward(action)
             else:
@@ -84,7 +90,7 @@ def run_agent_evaluation(agent_name: str = 'schedule', runs: int = 50, state_dim
             states.append(state)
 
             # stream logging per-step
-            mlflow.log_metric('step_reward', reward, step=i)
+            mlflow.log_metric("step_reward", reward, step=i)
 
         # final logging
         evaluator = Evaluator()
@@ -100,11 +106,18 @@ def run_agent_evaluation(agent_name: str = 'schedule', runs: int = 50, state_dim
             pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--agent', choices=['schedule', 'reschedule'], default='schedule')
-    parser.add_argument('--runs', type=int, default=50)
-    parser.add_argument('--state-dim', type=int, default=8)
-    parser.add_argument('--experiment', type=str, default='agent-eval')
+    parser.add_argument(
+        "--agent", choices=["schedule", "reschedule"], default="schedule"
+    )
+    parser.add_argument("--runs", type=int, default=50)
+    parser.add_argument("--state-dim", type=int, default=8)
+    parser.add_argument("--experiment", type=str, default="agent-eval")
     args = parser.parse_args()
-    run_agent_evaluation(agent_name=args.agent, runs=args.runs, state_dim=args.state_dim, experiment=args.experiment)
+    run_agent_evaluation(
+        agent_name=args.agent,
+        runs=args.runs,
+        state_dim=args.state_dim,
+        experiment=args.experiment,
+    )

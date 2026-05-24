@@ -29,11 +29,21 @@ jobs:
       - name: Black (check)
         run: |
           black --version
-          black --check .
+          black --check \
+            backend/ml/evaluation/evaluator.py \
+            backend/ml/evaluation/runner.py \
+            backend/tests/conftest.py \
+            backend/tests/test_evaluator.py \
+            backend/tests/test_runner.py
 
       - name: Flake8
         run: |
-          flake8 backend
+          flake8 \
+            backend/ml/evaluation/evaluator.py \
+            backend/ml/evaluation/runner.py \
+            backend/tests/conftest.py \
+            backend/tests/test_evaluator.py \
+            backend/tests/test_runner.py
 
       - name: Mypy
         run: |

@@ -1,25 +1,27 @@
 import os
-import io
 import tempfile
 from contextlib import contextmanager
-from typing import Optional, Sequence, Iterable
+from typing import Iterable, Optional, Sequence
 
+import matplotlib
 import mlflow
-import os
+import numpy as np
+from sklearn import metrics
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+try:
+    import seaborn as sns  # noqa: E402
+except Exception:
+    sns = None
+
 try:
     import wandb
+
     _WANDB_AVAILABLE = True
 except Exception:
     _WANDB_AVAILABLE = False
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-try:
-    import seaborn as sns
-except Exception:
-    sns = None
-from sklearn import metrics
 
 
 def _ensure_local_file_tracking_store(tracking_uri: Optional[str]) -> None:
@@ -28,11 +30,11 @@ def _ensure_local_file_tracking_store(tracking_uri: Optional[str]) -> None:
 
     local_path = tracking_uri
     if local_path.startswith("file:///"):
-        local_path = local_path[len("file:///"):]
+        local_path = local_path[len("file:///") :]
     elif local_path.startswith("file://"):
-        local_path = local_path[len("file://"):]
+        local_path = local_path[len("file://") :]
     else:
-        local_path = local_path[len("file:"):]
+        local_path = local_path[len("file:") :]
 
     if local_path:
         os.makedirs(local_path, exist_ok=True)
@@ -49,14 +51,19 @@ def _mlflow_run_context():
 
 
 class Evaluator:
-    def __init__(self, experiment_name: Optional[str] = None, tracking_uri: Optional[str] = None):
+    def __init__(
+        self, experiment_name: Optional[str] = None, tracking_uri: Optional[str] = None
+    ):
         if tracking_uri:
             _ensure_local_file_tracking_store(tracking_uri)
             mlflow.set_tracking_uri(tracking_uri)
         if experiment_name:
             mlflow.set_experiment(experiment_name)
         # optional Weights & Biases integration
-        self.wandb_enabled = os.getenv('ENABLE_WANDB', 'false').lower() in ('1', 'true') and _WANDB_AVAILABLE
+        self.wandb_enabled = (
+            os.getenv("ENABLE_WANDB", "false").lower() in ("1", "true")
+            and _WANDB_AVAILABLE
+        )
         if self.wandb_enabled:
             # initialize wandb run lazily during log calls
             self._wandb_run = None
@@ -80,7 +87,13 @@ class Evaluator:
             except Exception:
                 pass
 
-    def log_classification(self, y_true: Sequence, y_proba: Optional[Sequence] = None, y_pred: Optional[Sequence] = None, prefix: str = "cls"):
+    def log_classification(
+        self,
+        y_true: Sequence,
+        y_proba: Optional[Sequence] = None,
+        y_pred: Optional[Sequence] = None,
+        prefix: str = "cls",
+    ):
         with _mlflow_run_context():
             y_true = np.array(y_true)
             if y_pred is None and y_proba is not None:
@@ -92,9 +105,19 @@ class Evaluator:
 
             # Basic metrics
             acc = float(metrics.accuracy_score(y_true, y_pred))
-            prec = float(metrics.precision_score(y_true, y_pred, average="weighted", zero_division=0))
-            rec = float(metrics.recall_score(y_true, y_pred, average="weighted", zero_division=0))
-            f1 = float(metrics.f1_score(y_true, y_pred, average="weighted", zero_division=0))
+            prec = float(
+                metrics.precision_score(
+                    y_true, y_pred, average="weighted", zero_division=0
+                )
+            )
+            rec = float(
+                metrics.recall_score(
+                    y_true, y_pred, average="weighted", zero_division=0
+                )
+            )
+            f1 = float(
+                metrics.f1_score(y_true, y_pred, average="weighted", zero_division=0)
+            )
 
             mlflow.log_metric(f"{prefix}_accuracy", acc)
             mlflow.log_metric(f"{prefix}_precision", prec)
@@ -140,7 +163,9 @@ class Evaluator:
                         pass
 
                     try:
-                        precision, recall, _ = metrics.precision_recall_curve(y_true, pos)
+                        precision, recall, _ = metrics.precision_recall_curve(
+                            y_true, pos
+                        )
                         ap = float(metrics.average_precision_score(y_true, pos))
                         mlflow.log_metric(f"{prefix}_average_precision", ap)
                         fig, ax = plt.subplots()
@@ -170,10 +195,10 @@ class Evaluator:
                 fig, ax = plt.subplots()
                 ax.scatter(y_true, y_pred, alpha=0.6)
                 lims = [np.min([y_true, y_pred]), np.max([y_true, y_pred])]
-                ax.plot(lims, lims, linestyle='--', color='gray')
-                ax.set_xlabel('Actual')
-                ax.set_ylabel('Predicted')
-                self._log_artifact_figure(fig, 'reg_scatter.png')
+                ax.plot(lims, lims, linestyle="--", color="gray")
+                ax.set_xlabel("Actual")
+                ax.set_ylabel("Predicted")
+                self._log_artifact_figure(fig, "reg_scatter.png")
                 plt.close(fig)
             except Exception:
                 pass
@@ -192,11 +217,11 @@ class Evaluator:
 
             try:
                 fig, ax = plt.subplots()
-                ax.plot(rewards, marker='o')
-                ax.set_xlabel('Episode')
-                ax.set_ylabel('Reward')
-                ax.set_title('Episode Rewards')
-                self._log_artifact_figure(fig, 'episode_rewards.png')
+                ax.plot(rewards, marker="o")
+                ax.set_xlabel("Episode")
+                ax.set_ylabel("Reward")
+                ax.set_title("Episode Rewards")
+                self._log_artifact_figure(fig, "episode_rewards.png")
                 plt.close(fig)
             except Exception:
                 pass
@@ -225,17 +250,21 @@ class Evaluator:
                     pass
 
     def stream_evaluate(self, generator: Iterable[dict], prefix: str = "stream"):
-        """Consume a generator yielding dicts that may contain 'reward', 'y_true','y_pred','y_proba'.
+        """Consume a generator yielding dicts with reward and optional labels.
 
         Each item is logged to MLflow as a metric at its step index.
         """
         with _mlflow_run_context():
             for step, item in enumerate(generator):
-                if 'reward' in item:
-                    mlflow.log_metric(f"{prefix}_reward", float(item['reward']), step=step)
-                if 'y_true' in item and 'y_pred' in item:
+                if "reward" in item:
+                    mlflow.log_metric(
+                        f"{prefix}_reward", float(item["reward"]), step=step
+                    )
+                if "y_true" in item and "y_pred" in item:
                     try:
-                        acc = float(metrics.accuracy_score(item['y_true'], item['y_pred']))
+                        acc = float(
+                            metrics.accuracy_score(item["y_true"], item["y_pred"])
+                        )
                         mlflow.log_metric(f"{prefix}_acc", acc, step=step)
                     except Exception:
                         pass
