@@ -1,5 +1,5 @@
-# Adaptive Rescheduling Agent (RL)
-# Triggers on performance drop/stress/missed milestones
+# Adaptive Rescheduling Agent (legacy baseline)
+# Preserved for historical model loading and comparisons
 try:
     import torch
     _TORCH_AVAILABLE = True

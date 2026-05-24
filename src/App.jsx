@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
-import { getAuthToken } from './api'
+import { clearAuthToken, getAuthToken } from './api'
 import LandingPage from './pages/LandingPage'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -9,12 +10,40 @@ import Analytics from './pages/Analytics'
 import Community from './pages/Community'
 import Profile from './pages/Profile'
 import SyllabusManager from './pages/SyllabusManager'
+import StudyTutor from './pages/StudyTutor'
 
 function PrivateRoute({ children }) {
     return getAuthToken() ? children : <Navigate to="/login" replace />
 }
 
+function BootScreen() {
+    return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600">
+            <div className="text-sm animate-pulse">Preparing your session...</div>
+        </div>
+    )
+}
+
 function App() {
+    const [authReady, setAuthReady] = useState(false)
+
+    useEffect(() => {
+        const ensureSession = () => {
+            const existingToken = getAuthToken()
+            if (existingToken) {
+                // If the token is stale, clear it and fall through to the public app shell.
+                try {
+                    clearAuthToken()
+                } catch (_) {}
+            }
+            setAuthReady(true)
+        }
+
+        ensureSession()
+    }, [])
+
+    if (!authReady) return <BootScreen />
+
     return (
         <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>
@@ -27,6 +56,7 @@ function App() {
                 <Route path="/community" element={<PrivateRoute><Community /></PrivateRoute>} />
                 <Route path="/profile" element={<PrivateRoute><Profile /></PrivateRoute>} />
                 <Route path="/syllabus" element={<PrivateRoute><SyllabusManager /></PrivateRoute>} />
+                <Route path="/study-tutor" element={<PrivateRoute><StudyTutor /></PrivateRoute>} />
             </Routes>
         </Router>
     )

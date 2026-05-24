@@ -6,10 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 
 from app.core.security import get_current_user_dep
 from app.db.session import get_db
-from app.db.models import User, ProgressLog
+from app.db.models import User, ProgressLog, ScheduledTopic
 
 router = APIRouter()
 _get_user = get_current_user_dep()
@@ -101,19 +102,84 @@ async def get_progress_dashboard(
         .limit(60)  # Get up to 60 days to calculate streak properly
     )
     logs = result.scalars().all()
-    completed_hours = sum(l.study_time or 0 for l in logs)
+    completed_hours_from_logs = sum(l.study_time or 0 for l in logs)
+    topic_result = await db.execute(
+        select(ScheduledTopic)
+        .where(ScheduledTopic.user_id == current_user.id)
+        .order_by(ScheduledTopic.subject, ScheduledTopic.unit_index, ScheduledTopic.topic_index)
+    )
+    topic_rows = topic_result.scalars().all()
+    completed_topic_hours = sum(float(row.estimated_hours or 0) for row in topic_rows if (row.status or "").lower() == "completed")
+    completed_hours = round(completed_hours_from_logs + completed_topic_hours, 2)
     daily_goal = current_user.study_hours_per_day or 2.0
     total_hours = max(completed_hours * 1.5, daily_goal * 7)
     percentage = int(min(100, completed_hours / total_hours * 100)) if total_hours > 0 else 0
-    
+
+    subject_map: dict[str, dict] = {}
+    status_counts = {"pending": 0, "completed": 0, "rescheduled": 0, "skipped": 0}
+    recent_completion_dates: dict[str, int] = {}
+    topic_completion_dates: set[str] = set()
+
+    for row in topic_rows:
+        subject = row.subject or "General"
+        subject_bucket = subject_map.setdefault(subject, {"subject": subject, "completed": 0, "pending": 0, "rescheduled": 0, "overdue": 0, "total": 0})
+        subject_bucket["total"] += 1
+        status = (row.status or "pending").lower()
+        if status in status_counts:
+            status_counts[status] += 1
+        if status == "completed":
+            subject_bucket["completed"] += 1
+            if row.completed_date:
+                day = row.completed_date.date().isoformat()
+                recent_completion_dates[day] = recent_completion_dates.get(day, 0) + 1
+                topic_completion_dates.add(day)
+        elif status == "rescheduled":
+            subject_bucket["rescheduled"] += 1
+        else:
+            subject_bucket["pending"] += 1
+
+    subject_completion = []
+    for bucket in subject_map.values():
+        bucket["completionRate"] = int((bucket["completed"] / bucket["total"]) * 100) if bucket["total"] else 0
+        subject_completion.append(bucket)
+    subject_completion.sort(key=lambda item: (-item["completed"], item["subject"]))
+
     # Calculate true consecutive day streak
     streak = _calculate_consecutive_streak(logs)
+    if streak == 0 and topic_completion_dates:
+        streak = _calculate_consecutive_streak_from_dates(topic_completion_dates)
 
     # Generate personalized motivation based on grade/course level
     grade = (current_user.grade or "").strip().lower()
     course = (current_user.course or "").strip().lower()
     suggestions = _get_personalized_suggestions(grade, course, streak, completed_hours)
     quotes = _get_personalized_quotes(grade, course)
+
+    completion_trend = []
+    for offset in range(13, -1, -1):
+        from datetime import datetime, timedelta, timezone
+        day = (datetime.now(timezone.utc).date() - timedelta(days=offset)).isoformat()
+        completion_trend.append({"day": day, "completed": recent_completion_dates.get(day, 0)})
+
+    upcoming_deadlines_result = await db.execute(
+        select(ScheduledTopic)
+        .where(ScheduledTopic.user_id == current_user.id)
+        .where(ScheduledTopic.scheduled_date.isnot(None))
+        .order_by(ScheduledTopic.scheduled_date.asc())
+        .limit(10)
+    )
+    upcoming_topics = upcoming_deadlines_result.scalars().all()
+    upcoming_items = [
+        {
+            "id": item.id,
+            "subject": item.subject,
+            "unit_name": item.unit_name,
+            "topic_name": item.topic_name,
+            "due_date": item.scheduled_date.isoformat() if item.scheduled_date else None,
+            "status": item.status,
+        }
+        for item in upcoming_topics
+    ]
 
     return {
         "weeklyProgress": {
@@ -122,6 +188,10 @@ async def get_progress_dashboard(
             "streak": streak,
             "percentage": percentage,
         },
+        "subjectCompletion": subject_completion,
+        "completionTrend": completion_trend,
+        "statusCounts": status_counts,
+        "upcomingItems": upcoming_items,
         "suggestions": suggestions,
         "motivationalQuotes": quotes,
         "achievements": [
@@ -263,4 +333,32 @@ def _calculate_consecutive_streak(logs: list) -> int:
             streak = 0
     
     return min(streak, 365)  # Cap at 1 year for display
+
+
+def _calculate_consecutive_streak_from_dates(dates: set[str]) -> int:
+    """Calculate consecutive streak from a set of ISO dates."""
+    if not dates:
+        return 0
+
+    from datetime import datetime, timedelta, timezone
+
+    parsed = sorted(
+        {datetime.fromisoformat(day).date() for day in dates},
+        reverse=True,
+    )
+    if not parsed:
+        return 0
+
+    today = datetime.now(timezone.utc).date()
+    streak = 0
+    current_date = parsed[0]
+    for i in range(len(parsed)):
+        expected_date = current_date - timedelta(days=i)
+        if parsed[i] == expected_date:
+            streak += 1
+        else:
+            break
+    if streak > 0 and parsed[0] < today - timedelta(days=1):
+        return 0
+    return min(streak, 365)
 

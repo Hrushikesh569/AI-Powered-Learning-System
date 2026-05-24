@@ -37,6 +37,9 @@ const Profiling = () => {
                 grades:                selected.grades,
                 studyHoursPerWeek:     Number(formData.studyHours) * 7,
                 attendanceRate:        Number(formData.attendance),
+                performance:           formData.performance,
+                motivation:            Number(formData.motivation),
+                learningStyle:         formData.learningStyle,
                 selfStudyHoursPerWeek: Math.round(Number(formData.studyHours) * 7 * 0.4),
                 numSubjects:           3,
             };

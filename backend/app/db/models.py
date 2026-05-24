@@ -10,6 +10,13 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=True, default='')
     hashed_password = Column(String, nullable=False)
+    phone_number = Column(String, nullable=True, default='')
+    email_verified = Column(Boolean, nullable=False, default=False)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
+    auth_provider = Column(String, nullable=False, default='password')
+    google_sub = Column(String, nullable=True, unique=True, index=True)
+    email_notifications_enabled = Column(Boolean, nullable=False, default=True)
+    sms_notifications_enabled = Column(Boolean, nullable=False, default=False)
     study_hours_per_day = Column(Float, nullable=True, default=2.0)
     study_start_hour = Column(Integer, nullable=True, default=9)  # e.g., 9 for 9 AM
     study_end_hour = Column(Integer, nullable=True, default=23)   # e.g., 23 for 11 PM
@@ -102,6 +109,35 @@ class ScheduleHistory(Base):
     reason = Column(String)
     changed_by_agent_id = Column(Integer, ForeignKey('agent_decisions.id'))
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class EmailVerificationToken(Base):
+    __tablename__ = 'email_verification_tokens'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    code_hash = Column(String, nullable=False)
+    purpose = Column(String, nullable=False, default='verify_email')
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    sent_at = Column(DateTime(timezone=True), server_default=func.now())
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class UserNotification(Base):
+    __tablename__ = 'user_notifications'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    channel = Column(String, nullable=False, default='email')
+    kind = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    body = Column(Text, nullable=False)
+    payload = Column(JSON, nullable=True)
+    dedupe_key = Column(String, nullable=False, unique=True, index=True)
+    scheduled_for = Column(DateTime(timezone=True), nullable=True, index=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    status = Column(String, nullable=False, default='queued', index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 class ModelPrediction(Base):
     __tablename__ = 'model_predictions'
@@ -237,3 +273,20 @@ class ScheduledTopic(Base):
     __table_args__ = (
         UniqueConstraint('material_id', 'subject', 'unit_name', 'topic_name', name='uq_scheduled_topic'),
     )
+
+
+class DeadlineItem(Base):
+    """Deadline extracted from an uploaded syllabus or study document."""
+    __tablename__ = 'deadline_items'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    material_id = Column(Integer, ForeignKey('study_materials.id', ondelete='CASCADE'), index=True)
+    subject = Column(String, index=True, nullable=True)
+    unit_name = Column(String, index=True, nullable=True)
+    topic_name = Column(String, index=True, nullable=True)
+    title = Column(String, nullable=False)
+    due_date = Column(DateTime(timezone=True), nullable=False, index=True)
+    source_text = Column(Text, nullable=True)
+    status = Column(String, default='upcoming', index=True)  # upcoming|due|overdue|done
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

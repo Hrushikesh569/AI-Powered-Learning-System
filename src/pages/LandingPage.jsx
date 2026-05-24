@@ -39,7 +39,12 @@ const LandingPage = () => {
                 <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
                     <div className="flex items-center space-x-2">
                         <Brain className="w-8 h-8 text-primary-600" />
-                        <span className="text-2xl font-bold text-gray-800">AI Scheduler</span>
+                        <div className="flex flex-col items-start">
+                            <span className="inline-flex items-center rounded-full border border-primary-100 bg-primary-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-primary-700 mb-2">
+                                Beta
+                            </span>
+                            <span className="text-2xl font-bold text-gray-800">AI Scheduler</span>
+                        </div>
                     </div>
                     <div className="flex space-x-4">
                         <Link to="/login" className="px-6 py-2 text-primary-600 hover:text-primary-700 font-medium">
@@ -141,6 +146,9 @@ const LandingPage = () => {
                 <div className="max-w-7xl mx-auto text-center">
                     <div className="flex items-center justify-center space-x-2 mb-4">
                         <Brain className="w-8 h-8 text-primary-400" />
+                        <span className="inline-flex items-center rounded-full border border-primary-700 bg-primary-800 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-white">
+                            Beta
+                        </span>
                         <span className="text-2xl font-bold">AI Scheduler</span>
                     </div>
                     <p className="text-gray-400 mb-4">Your Personal Study Mentor</p>

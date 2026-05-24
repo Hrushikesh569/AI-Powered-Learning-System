@@ -2,6 +2,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import DashboardLayout from '../layouts/DashboardLayout';
 import { agentAPI } from '../api';
+import { studyGroups as fallbackStudyGroups, forumPosts as fallbackForumPosts } from '../data/mockData';
 import {
     Users, MessageSquare, Heart, Plus, ArrowLeft, Trash2,
     Send, ChevronDown, ChevronUp, RefreshCw, Lightbulb, HelpCircle, MessageCircle,
@@ -26,6 +27,29 @@ const GROUP_COLORS = [
     'from-red-500 to-red-700',
     'from-yellow-500 to-orange-600',
 ];
+
+const _buildFallbackGroups = () =>
+    fallbackStudyGroups.map((group, index) => ({
+        id: group.id,
+        name: group.name,
+        description: group.description,
+        memberCount: group.members || 0,
+        postCount: fallbackForumPosts.length,
+        isMyGroup: index === 0,
+        similarityScore: 100 - (index * 10),
+    }));
+
+const _buildFallbackFeed = (group) =>
+    fallbackForumPosts.map((post, index) => ({
+        id: `${group?.id || 0}-fallback-${index + 1}`,
+        author: post.author,
+        content: `${post.title}\n\n${post.content}`,
+        tag: index === 0 ? 'question' : 'discussion',
+        likes: post.upvotes || 0,
+        commentCount: post.comments || 0,
+        isOwn: false,
+        createdAt: new Date(Date.now() - ((index + 1) * 3600 * 1000)).toISOString(),
+    }));
 
 function timeAgo(iso) {
     if (!iso) return '';
@@ -174,10 +198,14 @@ const Community = () => {
     useEffect(() => {
         const load = async () => {
             setLoadingGroups(true);
+            setError('');
             try {
                 const res = await agentAPI.listStudyGroups();
                 setGroups(res.groups || []);
-            } catch { setError('Failed to load groups.'); }
+            } catch {
+                setGroups(_buildFallbackGroups());
+                setError('Showing sample community groups until the backend is available.');
+            }
             finally { setLoadingGroups(false); }
         };
         load();
@@ -206,7 +234,11 @@ const Community = () => {
         try {
             const res = await agentAPI.getGroupFeed(groupId);
             setFeed(res.posts || []);
-        } catch { /* ignore polling errors */ }
+        } catch {
+            const fallbackGroup = groups.find((group) => group.id === groupId) || activeGroup;
+            setFeed(_buildFallbackFeed(fallbackGroup));
+            if (!silent) setError('Showing sample posts until the backend is available.');
+        }
         finally { if (!silent) setLoadingFeed(false); }
     };
 
@@ -218,7 +250,21 @@ const Community = () => {
             const newPost = await agentAPI.createPost(activeGroup.id, { content: postText, tag: postTag });
             setFeed(prev => [{ ...newPost, commentCount: 0 }, ...prev]);
             setPostText('');
-        } catch { setError('Could not post. Please try again.'); }
+        } catch {
+            const fallbackPost = {
+                id: Date.now(),
+                author: 'You',
+                content: postText,
+                tag: postTag,
+                likes: 0,
+                commentCount: 0,
+                isOwn: true,
+                createdAt: new Date().toISOString(),
+            };
+            setFeed((prev) => [fallbackPost, ...prev]);
+            setPostText('');
+            setError('Posted locally because the backend is unavailable.');
+        }
         finally { setPosting(false); }
     };
 

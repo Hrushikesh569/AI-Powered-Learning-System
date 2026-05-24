@@ -1,5 +1,6 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -7,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.security import get_current_user_dep
-from app.core.syllabus_intelligence import build_time_slots
-from app.db.models import ScheduledTopic, SubjectAnalysis, User
+from app.core.syllabus_intelligence import build_time_slots, find_cross_subject_relations, generate_llm_adaptive_schedule, generate_intelligent_schedule as _gen
+from app.db.models import AgentDecision, ScheduleHistory, ScheduledTopic, StudyPlan, SubjectAnalysis, User
 from app.db.session import get_db
 
 router = APIRouter()
@@ -29,95 +30,103 @@ async def get_subject_hierarchy(
     Used by the frontend topic-picker modal so students can choose what to
     study today without inspecting raw schedule entries.
     """
-    # Source of truth: ScheduledTopic rows (guaranteed per subject/unit/topic granularity)
+    # Source of truth: combine ScheduledTopic rows with SubjectAnalysis so one
+    # subject that already has scheduled rows does not hide the rest of the syllabus.
     st_result = await db.execute(
         select(ScheduledTopic)
         .where(ScheduledTopic.user_id == current_user.id)
         .order_by(ScheduledTopic.subject, ScheduledTopic.unit_index, ScheduledTopic.topic_index)
     )
     rows = st_result.scalars().all()
-
-    if rows:
-        diff_to_num = {"easy": 1, "basic": 2, "intermediate": 3, "medium": 3, "hard": 4, "advanced": 5}
-        grouped: dict[str, dict] = {}
-        for r in rows:
-            subj = r.subject or "Unknown"
-            if subj not in grouped:
-                grouped[subj] = {
-                    "subject_name": subj,
-                    "subject_code": r.subject_code or "",
-                    "overview": "",
-                    "units": {},
-                }
-            ukey = r.unit_name or "Unit"
-            units = grouped[subj]["units"]
-            if ukey not in units:
-                units[ukey] = {
-                    "unit_name": ukey,
-                    "unit_number": (r.unit_index or 0) + 1,
-                    "topics": [],
-                    "_idx": r.unit_index or 0,
-                }
-            raw_diff = str(r.difficulty or "Intermediate").lower()
-            diff_num = diff_to_num.get(raw_diff, 3)
-            units[ukey]["topics"].append({
-                "name": r.topic_name or "",
-                "difficulty": diff_num,
-                "difficulty_label": str(r.difficulty or "Intermediate"),
-                "est_hours": float(r.estimated_hours or 1.0),
-                "is_foundational": diff_num <= 2,
-            })
-
-        hierarchy = []
-        for subj_name in sorted(grouped.keys()):
-            subj = grouped[subj_name]
-            unit_list = sorted(subj["units"].values(), key=lambda u: u.get("_idx", 0))
-            for u in unit_list:
-                u.pop("_idx", None)
-            hierarchy.append({
-                "subject_name": subj["subject_name"],
-                "subject_code": subj["subject_code"],
-                "overview": subj["overview"],
-                "units": unit_list,
-            })
-        return {"hierarchy": hierarchy}
-
-    # Fallback to SubjectAnalysis if ScheduledTopic is empty
     result = await db.execute(
         select(SubjectAnalysis).where(SubjectAnalysis.user_id == current_user.id)
     )
     records = result.scalars().all()
 
-    hierarchy = []
+    diff_to_num = {"easy": 1, "basic": 2, "intermediate": 3, "medium": 3, "hard": 4, "advanced": 5}
+    grouped: dict[str, dict] = {}
+
+    for r in rows:
+        subj = r.subject or "Unknown"
+        if subj not in grouped:
+            grouped[subj] = {
+                "subject_name": subj,
+                "subject_code": r.subject_code or "",
+                "overview": "",
+                "units": {},
+            }
+        ukey = r.unit_name or "Unit"
+        units = grouped[subj]["units"]
+        if ukey not in units:
+            units[ukey] = {
+                "unit_name": ukey,
+                "unit_number": (r.unit_index or 0) + 1,
+                "topics": [],
+                "_idx": r.unit_index or 0,
+            }
+        raw_diff = str(r.difficulty or "Intermediate").lower()
+        diff_num = diff_to_num.get(raw_diff, 3)
+        units[ukey]["topics"].append({
+            "name": r.topic_name or "",
+            "difficulty": diff_num,
+            "difficulty_label": str(r.difficulty or "Intermediate"),
+            "est_hours": float(r.estimated_hours or 1.0),
+            "is_foundational": diff_num <= 2,
+        })
+
     for r in records:
         if not r.analysis_json:
             continue
         a = r.analysis_json
-        units_out = []
+        subj_name = a.get("subject_name", r.subject or "Unknown")
+        if subj_name not in grouped:
+            grouped[subj_name] = {
+                "subject_name": subj_name,
+                "subject_code": a.get("subject_code", ""),
+                "overview": a.get("overview", ""),
+                "units": {},
+            }
+        subj = grouped[subj_name]
+        if not subj.get("subject_code"):
+            subj["subject_code"] = a.get("subject_code", "")
+        if not subj.get("overview"):
+            subj["overview"] = a.get("overview", "")
         for unit in a.get("units", []):
-            topics_out = [
-                {
-                    "name": t.get("name", ""),
-                    "difficulty": t.get("difficulty", 3),
-                    "difficulty_label": t.get("difficultyLabel", "") or
-                        ["", "Easy", "Basic", "Intermediate", "Hard", "Advanced"][
-                            max(1, min(5, t.get("difficulty", 3)))
-                        ],
-                    "est_hours": t.get("est_hours", 1.0),
-                    "is_foundational": t.get("is_foundational", False),
+            ukey = unit.get("unit_name", "Unit")
+            units = subj["units"]
+            if ukey not in units:
+                units[ukey] = {
+                    "unit_name": ukey,
+                    "unit_number": unit.get("unit_number", 0),
+                    "topics": [],
+                    "_idx": unit.get("unit_number", 0),
                 }
-                for t in unit.get("topics", [])
-            ]
-            units_out.append({
-                "unit_name": unit.get("unit_name", ""),
-                "unit_number": unit.get("unit_number", 0),
-                "topics": topics_out,
-            })
+            topics = units[ukey]["topics"]
+            for t in unit.get("topics", []):
+                if not isinstance(t, dict):
+                    continue
+                raw_diff = str(t.get("difficulty", 3)).lower()
+                diff_num = diff_to_num.get(raw_diff, int(t.get("difficulty", 3)) if str(t.get("difficulty", 3)).isdigit() else 3)
+                topics.append({
+                    "name": t.get("name", ""),
+                    "difficulty": diff_num,
+                    "difficulty_label": t.get("difficultyLabel", "") or ["", "Easy", "Basic", "Intermediate", "Hard", "Advanced"][max(1, min(5, diff_num))],
+                    "est_hours": float(t.get("est_hours", 1.0)),
+                    "is_foundational": t.get("is_foundational", False),
+                })
+
+    hierarchy = []
+
+    for subj_name in sorted(grouped.keys()):
+        subj = grouped[subj_name]
+        unit_list = sorted(subj["units"].values(), key=lambda u: u.get("_idx", 0))
+        for u in unit_list:
+            u.pop("_idx", None)
         hierarchy.append({
-            "subject_name": a.get("subject_name", r.subject or "Unknown"),
-            "subject_code": a.get("subject_code", ""),
-            "overview": a.get("overview", ""),
-            "units": units_out,
+            "subject_name": subj["subject_name"],
+            "subject_code": subj.get("subject_code", ""),
+            "overview": subj.get("overview", ""),
+            "units": unit_list,
         })
 
     return {"hierarchy": hierarchy}
@@ -366,8 +375,8 @@ async def generate_intelligent_schedule(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Adaptive (Dynamic) Rescheduling — ML-driven, reacts to missed topics,
-# stress, performance, and residual difficulty.
+# Adaptive (Dynamic) Rescheduling — LLM-guided live scheduling that reacts to
+# missed topics, stress, performance, and residual difficulty.
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _filter_completed(analyses: list, completed: set) -> list:
@@ -381,7 +390,7 @@ def _filter_completed(analyses: list, completed: set) -> list:
                 a_copy["units"].append({**unit, "topics": remaining})
         if a_copy["units"]:
             out.append(a_copy)
-    return out or analyses  # keep full list if user marked everything done (edge case)
+    return out
 
 
 def _boost_missed(analyses: list, missed: set) -> list:
@@ -440,6 +449,8 @@ def _adjustment_reason(action_val: float, stress: float, perf: float, n_missed: 
 class AdaptiveScheduleRequest(BaseModel):
     completed_topics: List[str] = []       # topic names already completed
     missed_topics: List[str] = []          # topic names that were skipped / missed
+    skipped_topics: List[str] = []         # user chose skip tomorrow
+    do_later_topics: List[str] = []        # user chose do later
     hours_per_day: float = 3.0
     num_days: int = 30
     stress_level: float = 0.3             # 0 = calm, 1 = very stressed
@@ -454,31 +465,18 @@ async def adaptive_reschedule(
     current_user: User = Depends(_get_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    ML-powered dynamic rescheduling.
+    """Generate a live schedule using the LLM-guided planner and persist it.
 
-    Factors in:
-    • Missed topics            — re-prioritized with [Review] label and +1 difficulty
-    • Completed topics         — removed so they are never shown again
-    • Stress level             — reduces daily hours under high stress
-    • Performance score        — adjusts pace (faster / slower)
-    • DQN RescheduleAgent      — predicts optimal hours-per-day delta given current state
-    • Remaining difficulty avg — informs how aggressively to front-load hard topics
-    • Cross-subject relations  — maintained from LLM analysis
+    The scheduler uses Ollama to rank topics by urgency, then the deterministic
+    packer lays them out inside the user's daily time window.
     """
-    from app.core.model_hot_reload import reschedule_agent
-    from app.core.syllabus_intelligence import (
-        find_cross_subject_relations,
-        generate_intelligent_schedule as _gen,
-    )
 
-    # ── 1. Load this user's LLM-analysed subject data ──────────────────────
-    result = await db.execute(
-        select(SubjectAnalysis).where(SubjectAnalysis.user_id == current_user.id)
-    )
+    # ── 1. Load this user's syllabus analyses ───────────────────────────────
+    result = await db.execute(select(SubjectAnalysis).where(SubjectAnalysis.user_id == current_user.id))
     records = result.scalars().all()
+    analyses = [r.analysis_json for r in records if r.analysis_json]
 
-    if not records:
+    if not analyses:
         return {
             "schedule": [],
             "summary": {},
@@ -486,86 +484,182 @@ async def adaptive_reschedule(
             "message": "No syllabus analysis found yet. Upload a syllabus to enable adaptive scheduling.",
         }
 
-    analyses = [r.analysis_json for r in records if r.analysis_json]
-    if not analyses:
-        return {"schedule": [], "summary": {}, "adjustments": {},
-                "message": "Analysis still in progress. Please retry in a moment."}
-
     completed_set = set(payload.completed_topics)
-    missed_set    = set(payload.missed_topics)
-    total_topics  = _count_topics(analyses)
+    missed_set = set(payload.missed_topics)
+    skipped_set = set(payload.skipped_topics)
+    later_set = set(payload.do_later_topics)
 
-    # ── 2. Filter completed, boost missed ──────────────────────────────────
-    filtered   = _filter_completed(analyses, completed_set)
-    augmented  = _boost_missed(filtered, missed_set)
+    filtered = _filter_completed(analyses, completed_set)
+    if not filtered:
+        return {
+            "schedule": [],
+            "summary": {},
+            "adjustments": {
+                "planner_mode": "rag-llm",
+                "llm_used": False,
+                "completed_topics_removed": list(completed_set),
+            },
+            "message": "All currently tracked topics are complete.",
+        }
 
-    remaining  = _count_topics(augmented)
-    avg_diff   = _avg_difficulty(augmented)
-    missed_ratio = len(missed_set) / max(total_topics, 1)
+    # Use a simple deterministic hour adjustment based on load and performance.
+    adjusted_hours = round(max(1.0, min(8.0, payload.hours_per_day + ((payload.performance_score - 0.5) * 0.8) - (payload.stress_level * 0.6))), 1)
 
-    # ── 3. Build DQN state vector & call RescheduleAgent ───────────────────
-    # State: [stress, missed_ratio, norm_difficulty, performance, remaining_fraction]
-    state = [
-        float(payload.stress_level),
-        float(missed_ratio),
-        float(avg_diff / 5.0),
-        float(payload.performance_score),
-        float(remaining / max(total_topics, 1)),
-    ]
-    reward = payload.performance_score - 0.5   # positive = good, negative = struggling
+    user_overrides = {t: {"extra_hours": 1.5} for t in payload.missed_topics}
+    for t in payload.do_later_topics:
+        user_overrides.setdefault(t, {"extra_hours": 0.5})
 
-    try:
-        action = reschedule_agent.adapt(state, reward)
-        action_val = float(action[0]) if action else 0.0
-    except Exception:
-        action_val = 0.0
-
-    # ── 4. Map ML action → adjusted hours per day ──────────────────────────
-    # DQN output scaled to ±1.5 h change; stress & performance apply separately
-    hours_delta  = action_val * 1.5
-    hours_delta -= payload.stress_level * 1.0          # penalize load under stress
-    hours_delta += (payload.performance_score - 0.5) * 0.5  # reward performance
-    adjusted_hours = round(max(1.0, min(8.0, payload.hours_per_day + hours_delta)), 1)
-
-    # ── 5. Extra time overrides for missed topics ──────────────────────────
-    user_overrides = {t: {"extra_hours": 2} for t in payload.missed_topics}
-
-    # ── 6. Cross-subject relations ─────────────────────────────────────────
     cross_relations: list = []
-    if payload.cross_subject and len(augmented) >= 2:
+    if payload.cross_subject and len(filtered) >= 2:
         try:
-            cross_relations = await find_cross_subject_relations(augmented)
+            cross_relations = await find_cross_subject_relations(filtered)
         except Exception:
             cross_relations = []
 
-    # ── 7. Generate updated schedule ───────────────────────────────────────
-    schedule_result = _gen(
-        augmented,
+    # ── 2. Generate the LLM-guided live plan ───────────────────────────────
+    start_day = date.today() + timedelta(days=1)
+    schedule_result = await generate_llm_adaptive_schedule(
+        filtered,
         hours_per_day=adjusted_hours,
         num_days=payload.num_days,
+        start_date=start_day,
         subject_priorities=payload.subject_priorities or {},
         cross_subject_relations=cross_relations,
         user_overrides=user_overrides,
         study_start_hour=current_user.study_start_hour or 9,
         study_end_hour=current_user.study_end_hour or 23,
+        stress_level=payload.stress_level,
+        performance_score=payload.performance_score,
+        completed_topics=payload.completed_topics,
+        missed_topics=payload.missed_topics,
+        skipped_topics=payload.skipped_topics,
+        do_later_topics=payload.do_later_topics,
     )
 
-    reason = _adjustment_reason(action_val, payload.stress_level,
-                                payload.performance_score, len(missed_set))
+    schedule_items = schedule_result.get("schedule", []) or []
+
+    # ── 3. Persist the generated plan and history ───────────────────────────
+    previous_plan_result = await db.execute(
+        select(StudyPlan)
+        .where(StudyPlan.user_id == current_user.id)
+        .order_by(StudyPlan.created_at.desc())
+    )
+    previous_plan = previous_plan_result.scalars().first()
+
+    decision = AgentDecision(
+        agent_name="reschedule",
+        user_id=current_user.id,
+        input_features={
+            "hours_per_day": payload.hours_per_day,
+            "stress_level": payload.stress_level,
+            "performance_score": payload.performance_score,
+            "completed_topics": payload.completed_topics,
+            "missed_topics": payload.missed_topics,
+            "skipped_topics": payload.skipped_topics,
+            "do_later_topics": payload.do_later_topics,
+            "subject_priorities": payload.subject_priorities or {},
+            "cross_subject": payload.cross_subject,
+        },
+        output_decision={
+            "planner": schedule_result.get("planner", {}),
+            "llm_summary": schedule_result.get("llm_summary", {}),
+            "adjusted_hours": adjusted_hours,
+            "total_items": len(schedule_items),
+        },
+        event_id=f"reschedule-{uuid4().hex}",
+    )
+    db.add(decision)
+    await db.flush()
+
+    from datetime import datetime as _dt
+
+    plan = StudyPlan(
+        user_id=current_user.id,
+        plan_json=schedule_result,
+        generated_by_agent_id=decision.id,
+        valid_from=_dt.combine(start_day, _dt.min.time()),
+        valid_to=_dt.combine(start_day + timedelta(days=max(payload.num_days - 1, 0)), _dt.min.time()),
+    )
+    db.add(plan)
+    await db.flush()
+
+    if previous_plan and previous_plan.id != plan.id:
+        db.add(ScheduleHistory(
+            user_id=current_user.id,
+            old_plan_id=previous_plan.id,
+            new_plan_id=plan.id,
+            reason=(schedule_result.get("llm_summary", {}) or {}).get("focus") or "LLM-guided live reschedule",
+            changed_by_agent_id=decision.id,
+        ))
+
+    # Update stored topic dates so the dashboard reflects the latest plan.
+    topic_rows_result = await db.execute(
+        select(ScheduledTopic)
+        .where(ScheduledTopic.user_id == current_user.id)
+    )
+    topic_rows = topic_rows_result.scalars().all()
+    topic_lookup: dict[str, ScheduledTopic] = {}
+    for row in topic_rows:
+        key = " | ".join([
+            str(row.subject or "").strip().lower(),
+            str(row.unit_name or "").strip().lower(),
+            str(row.topic_name or "").strip().lower(),
+        ])
+        topic_lookup[key] = row
+
+    for item in schedule_items:
+        key = " | ".join([
+            str(item.get("subject", "")).strip().lower(),
+            str(item.get("unit", "")).strip().lower(),
+            str(item.get("topic", "")).strip().lower(),
+        ])
+        row = topic_lookup.get(key)
+        if not row or (row.status or "").lower() == "completed":
+            continue
+        try:
+            day_value = str(item.get("date", ""))[:10]
+            time_value = str(item.get("time", "09:00 AM"))
+            schedule_dt = datetime.combine(
+                datetime.fromisoformat(day_value).date(),
+                datetime.strptime(time_value, "%I:%M %p").time(),
+            )
+        except Exception:
+            schedule_dt = datetime.combine(start_day, datetime.min.time())
+        row.scheduled_date = schedule_dt
+        row.status = str(item.get("status", "pending")) or "pending"
+
+    await db.commit()
+
+    missed_count = len(missed_set)
+    completed_count = len(completed_set)
+    skipped_count = len(skipped_set)
+    later_count = len(later_set)
 
     return {
         **schedule_result,
         "crossSubjectRelations": cross_relations,
+        "plan_id": plan.id,
+        "decision_id": decision.id,
         "adjustments": {
-            "hours_per_day":               adjusted_hours,
-            "original_hours":              payload.hours_per_day,
-            "ml_action_value":             round(action_val, 3),
-            "stress_level":                payload.stress_level,
-            "performance_score":           payload.performance_score,
+            "planner_mode": schedule_result.get("planner", {}).get("mode", "rag-llm"),
+            "llm_used": schedule_result.get("planner", {}).get("used_llm", False),
+            "hours_per_day": adjusted_hours,
+            "original_hours": payload.hours_per_day,
+            "stress_level": payload.stress_level,
+            "performance_score": payload.performance_score,
             "missed_topics_reprioritized": list(missed_set),
-            "completed_topics_removed":    list(completed_set),
-            "remaining_topics":            remaining,
-            "adjustment_reason":           reason,
+            "skipped_topics_deferred": list(skipped_set),
+            "do_later_topics_deferred": list(later_set),
+            "completed_topics_removed": list(completed_set),
+            "next_day_start": start_day.isoformat(),
+            "schedule_items": len(schedule_items),
+            "adjustment_reason": (schedule_result.get("llm_summary", {}) or {}).get("carry_forward") or "LLM-guided live reschedule",
+            "counts": {
+                "completed": completed_count,
+                "missed": missed_count,
+                "skipped": skipped_count,
+                "do_later": later_count,
+            },
         },
     }
 

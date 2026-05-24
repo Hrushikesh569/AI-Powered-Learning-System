@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Mail, Lock, User, Target, Brain } from 'lucide-react';
+import { Mail, Lock, User, Target, Brain, Phone } from 'lucide-react';
 import { agentAPI, setAuthToken } from '../api';
 
 const Register = () => {
@@ -9,6 +9,7 @@ const Register = () => {
     const [formData, setFormData] = useState({
         name: '',
         email: '',
+        phoneNumber: '',
         password: '',
         confirmPassword: '',
         studyHours: 5,
@@ -18,6 +19,8 @@ const Register = () => {
     });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+
+    const passwordHint = 'Use 8+ characters with uppercase, lowercase, a number, and a special character.';
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -32,6 +35,7 @@ const Register = () => {
             const res = await agentAPI.register({
                 name: formData.name,
                 email: formData.email,
+                phoneNumber: formData.phoneNumber,
                 password: formData.password,
                 studyHoursPerDay: Number(formData.studyHours),
                 learningGoal: formData.learningGoal,
@@ -39,10 +43,6 @@ const Register = () => {
                 course: formData.course,
             });
 
-            // Store JWT from response
-            setAuthToken(res.access_token);
-            
-            // Clear old user data
             localStorage.removeItem('taskStatuses');
             localStorage.removeItem('preferredTopics');
             localStorage.removeItem('hiddenSubjects');
@@ -53,9 +53,9 @@ const Register = () => {
             localStorage.removeItem('activityMap');
             localStorage.removeItem('scheduleOverrides');
             localStorage.removeItem('preferredSubjectToday');
-            
-            // Set new user data
-            localStorage.setItem('userName', res.name || formData.name);
+
+            setAuthToken(res.access_token);
+            localStorage.setItem('userName', res.name || formData.name || formData.email);
             localStorage.setItem('userEmail', res.email || formData.email);
             localStorage.setItem(
                 'learningPreferences',
@@ -68,8 +68,9 @@ const Register = () => {
             );
 
             navigate('/profiling');
-        } catch (_err) {
-            setError('Registration failed. Please try again.');
+        } catch (err) {
+            const detail = err?.message ? String(err.message).replace(/^\{"detail":"|"\}$/g, '') : '';
+            setError(detail || 'Registration failed. Please try again.');
         } finally {
             setLoading(false);
         }
@@ -85,7 +86,12 @@ const Register = () => {
                 <div className="text-center mb-8">
                     <div className="flex items-center justify-center space-x-2 mb-4">
                         <Brain className="w-10 h-10 text-primary-600" />
-                        <span className="text-3xl font-bold text-gray-800">AI Scheduler</span>
+                        <div className="flex flex-col items-start">
+                            <span className="inline-flex items-center rounded-full border border-primary-100 bg-primary-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-primary-700 mb-2">
+                                Beta
+                            </span>
+                            <span className="text-3xl font-bold text-gray-800">AI Scheduler</span>
+                        </div>
                     </div>
                     <h2 className="text-2xl font-bold text-gray-800">Create Account</h2>
                     <p className="text-gray-600 mt-2">Start your personalized learning journey</p>
@@ -123,6 +129,20 @@ const Register = () => {
                     </div>
 
                     <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Mobile Number</label>
+                        <div className="relative">
+                            <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                            <input
+                                type="tel"
+                                value={formData.phoneNumber}
+                                onChange={(e) => setFormData({ ...formData, phoneNumber: e.target.value })}
+                                className="input-field pl-10"
+                                placeholder="+1 555 123 4567"
+                            />
+                        </div>
+                    </div>
+
+                    <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
                         <div className="relative">
                             <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
@@ -135,6 +155,7 @@ const Register = () => {
                                 required
                             />
                         </div>
+                        <p className="mt-2 text-xs text-gray-500">{passwordHint}</p>
                     </div>
 
                     <div>
@@ -178,7 +199,7 @@ const Register = () => {
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Course / Stream</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Branch / Course</label>
                         <input
                             type="text"
                             value={formData.course}

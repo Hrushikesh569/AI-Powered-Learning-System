@@ -2,6 +2,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import DashboardLayout from '../layouts/DashboardLayout';
 import { agentAPI } from '../api';
+import { studyGroups as fallbackStudyGroups, scheduleData as fallbackScheduleData } from '../data/mockData';
 import {
     Upload, FileText, Folder, FolderOpen, Trash2, Plus,
     ChevronRight, ChevronDown, ChevronUp, BookOpen, Calendar,
@@ -26,6 +27,56 @@ const SUBJECT_ICONS = {
 
 const subjectIcon = (name) => SUBJECT_ICONS[name] || '\u{1F4C1}';
 
+const _processingLabel = (file) => {
+    const state = String(file?.processingState || '').toLowerCase();
+    if (state === 'analysis_ready') return 'Analyzing syllabus…';
+    if (state === 'topics_ready') return 'Finalizing topics…';
+    if (state === 'ready') return 'Ready';
+    if (state === 'not_found') return 'Checking file…';
+    return 'Extracting…';
+};
+
+const buildFallbackSubjects = () => {
+    const subjectMap = new Map();
+    fallbackScheduleData.forEach((item, index) => {
+        const subjectName = item.subject || 'General';
+        if (!subjectMap.has(subjectName)) {
+            subjectMap.set(subjectName, {
+                name: subjectName,
+                fileCount: 1,
+                topicCount: 0,
+                units: [],
+            });
+        }
+        const subject = subjectMap.get(subjectName);
+        subject.topicCount += 1;
+        subject.units.push({
+            unitName: item.unit || 'General Unit',
+            topicCount: 1,
+            topics: [{
+                id: index + 1,
+                name: item.topic,
+                topic_name: item.topic,
+                difficulty: item.status === 'completed' ? 'Basic' : 'Intermediate',
+                status: item.status,
+            }],
+        });
+    });
+    return Array.from(subjectMap.values());
+};
+
+const buildFallbackFiles = (subjectName = '') => {
+    const items = fallbackScheduleData.filter((item) => !subjectName || item.subject === subjectName);
+    return items.map((item, index) => ({
+        id: index + 1,
+        filename: `${item.subject || 'Study'}-notes-${index + 1}.pdf`,
+        unitName: item.unit || 'General',
+        topicCount: 1,
+        processing: false,
+        topics: [item.topic],
+    }));
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -41,7 +92,7 @@ const fileTypeBadge = (name = '') => {
 // FileBrowser — collapsible folder tree: Subject → Unit → Files → Topics
 // ─────────────────────────────────────────────────────────────────────────────
 const FileBrowser = ({ files, expandedFile, fileTopics, fileAnalysis, loadingTopics,
-    onExpand, onDelete, onRetry, onUploadToUnit, onMarkComplete, onReschedule, selectedSubject }) => {
+    onExpand, onDelete, onRetry, onUploadToUnit, onMarkComplete, onReschedule, onSelectFile, selectedSubject }) => {
 
     const [openUnits, setOpenUnits] = useState({});
     const [openSubjects, setOpenSubjects] = useState({});
@@ -73,17 +124,15 @@ const FileBrowser = ({ files, expandedFile, fileTopics, fileAnalysis, loadingTop
     }, [files.length]);
 
     const renderFile = (file) => {
-        const isStuck = file.processing && file.createdAt &&
-            (Date.now() - new Date(file.createdAt).getTime()) > 2 * 60 * 1000;
         const badge = fileTypeBadge(file.filename);
-        const canExpand = !file.processing && !isStuck && (file.topicCount || 0) > 0;
+        const canExpand = !file.processing && (file.topicCount || 0) > 0;
 
         return (
             <div key={file.id} className="group">
                 {/* ── File row ── */}
                 <div
                     className={`flex items-center gap-2 py-1.5 px-2 rounded-lg transition ${canExpand ? 'hover:bg-gray-50 cursor-pointer' : 'hover:bg-gray-50'}`}
-                    onClick={() => { if (canExpand) onExpand(file.id); }}
+                    onClick={() => { if (canExpand) { onSelectFile?.(file); onExpand(file.id); } }}
                     role={canExpand ? 'button' : undefined}
                     tabIndex={canExpand ? 0 : undefined}
                     onKeyDown={(e) => {
@@ -113,13 +162,9 @@ const FileBrowser = ({ files, expandedFile, fileTopics, fileAnalysis, loadingTop
                     </div>
 
                     {/* Status chip */}
-                    {isStuck ? (
-                        <span className="text-[10px] text-orange-600 bg-orange-50 border border-orange-200 rounded px-1.5 py-0.5 inline-flex items-center gap-0.5 flex-shrink-0">
-                            <AlertTriangle className="w-3 h-3" /> Timed out
-                        </span>
-                    ) : file.processing ? (
+                    {file.processing ? (
                         <span className="text-[10px] text-amber-600 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 inline-flex items-center gap-0.5 flex-shrink-0">
-                            <Loader className="w-3 h-3 animate-spin" /> Extracting…
+                            <Loader className="w-3 h-3 animate-spin" /> {_processingLabel(file)}
                         </span>
                     ) : (
                         <span className="text-[10px] text-gray-400 flex-shrink-0">{file.topicCount} topics</span>
@@ -135,13 +180,6 @@ const FileBrowser = ({ files, expandedFile, fileTopics, fileAnalysis, loadingTop
                     )}
 
                     {/* Retry */}
-                    {isStuck && (
-                        <button onClick={(e) => { e.stopPropagation(); onRetry(file.id); }}
-                            className="p-0.5 text-orange-500 hover:text-orange-700 transition flex-shrink-0" title="Retry">
-                            <RefreshCw className="w-3.5 h-3.5" />
-                        </button>
-                    )}
-
                     {/* Delete */}
                     <button onClick={(e) => { e.stopPropagation(); onDelete(file.id); }}
                         className="p-0.5 text-gray-300 hover:text-red-500 transition flex-shrink-0 opacity-0 group-hover:opacity-100">
@@ -447,6 +485,9 @@ const SyllabusManager = () => {
     const [processingIds, setProcessingIds] = useState([]);
     const [generatingSchedule, setGeneratingSchedule] = useState(false);
     const [schedulePreview, setSchedulePreview] = useState([]);
+    const [studyFile, setStudyFile] = useState(null);
+    const [studyPreviewUrl, setStudyPreviewUrl] = useState('');
+    const [studyPreviewLoading, setStudyPreviewLoading] = useState(false);
     const [newSubjectName, setNewSubjectName] = useState('');
     const [newUnitName, setNewUnitName] = useState('');
     const schedFileRef = useRef();
@@ -459,7 +500,7 @@ const SyllabusManager = () => {
             const res = await agentAPI.listSubjects();
             setSubjects(res.subjects || []);
         } catch {
-            setSubjects([]);
+            setSubjects(buildFallbackSubjects());
         } finally {
             setLoadingSubjects(false);
         }
@@ -475,7 +516,7 @@ const SyllabusManager = () => {
             const still = fetched.filter(f => f.processing).map(f => f.id);
             if (still.length > 0) setProcessingIds(ids => [...new Set([...ids, ...still])]);
         } catch {
-            setFiles([]);
+            setFiles(buildFallbackFiles(subjectName));
         } finally {
             setLoadingFiles(false);
         }
@@ -493,13 +534,24 @@ const SyllabusManager = () => {
                     if (!res.processing && res.topicCount > 0) {
                         // Update the file in the list
                         setFiles(prev => prev.map(f =>
-                            f.id === id ? { ...f, topics: res.topics.slice(0, 100), topicCount: res.topicCount, processing: false } : f
+                            f.id === id ? {
+                                ...f,
+                                topics: res.topics.slice(0, 100),
+                                topicCount: res.topicCount,
+                                processing: false,
+                                processingState: res.processingState || f.processingState,
+                            } : f
                         ));
                         // Refresh subjects count
                         loadSubjects();
                         // Show success message
-                        setStatusMsg(`Topics extracted: ${res.topicCount} topics ready!`);
-                        setStatusType('success');
+                        if (res.processingState === 'analysis_ready') {
+                            setStatusMsg(`Topics extracted: ${res.topicCount} topics ready. Analysis is still running.`);
+                            setStatusType('info');
+                        } else {
+                            setStatusMsg(`Topics extracted: ${res.topicCount} topics ready!`);
+                            setStatusType('success');
+                        }
                         // Auto-fetch analysis
                         try {
                             const aRes = await agentAPI.getFileAnalysis(id);
@@ -514,10 +566,15 @@ const SyllabusManager = () => {
                     } else if (!res.processing) {
                         // Extraction done but 0 topics — stop polling, update state so badge clears
                         setFiles(prev => prev.map(f =>
-                            f.id === id ? { ...f, processing: false, topicCount: 0 } : f
+                            f.id === id ? { ...f, processing: false, topicCount: 0, processingState: res.processingState || f.processingState } : f
                         ));
-                        setStatusMsg('PDF processed — no topics found. Make sure it\'s a course syllabus and try re-uploading.');
-                        setStatusType('warning');
+                        if (res.processingState === 'analysis_ready') {
+                            setStatusMsg('Syllabus text was extracted, but no topic list was generated yet. Try re-uploading a cleaner syllabus PDF.');
+                            setStatusType('warning');
+                        } else {
+                            setStatusMsg('PDF processed — no topics found. Make sure it\'s a course syllabus and try re-uploading.');
+                            setStatusType('warning');
+                        }
                     } else {
                         remaining.push(id);
                     }
@@ -536,6 +593,30 @@ const SyllabusManager = () => {
     useEffect(() => {
         if (selectedSubject) loadFiles(selectedSubject.name);
     }, [selectedSubject, loadFiles]);
+
+    useEffect(() => {
+        return () => {
+            if (studyPreviewUrl) URL.revokeObjectURL(studyPreviewUrl);
+        };
+    }, [studyPreviewUrl]);
+
+    const loadStudyPreview = async (file) => {
+        if (!file?.id) return;
+        setStudyFile(file);
+        setStudyPreviewLoading(true);
+        if (studyPreviewUrl) {
+            URL.revokeObjectURL(studyPreviewUrl);
+            setStudyPreviewUrl('');
+        }
+        try {
+            const url = await agentAPI.getFileBlobUrl(file.id);
+            setStudyPreviewUrl(url);
+        } catch {
+            setStudyPreviewUrl('');
+        } finally {
+            setStudyPreviewLoading(false);
+        }
+    };
 
     // After a syllabus is processed, save the intelligent schedule into localStorage
     // so the Dashboard can display it. Falls back to keyword schedule if no analysis yet.
@@ -697,7 +778,7 @@ const SyllabusManager = () => {
                         const t = q.shift();
                         let hrs = Number(t.estimated_hours || 1);
                         if (!Number.isFinite(hrs) || hrs <= 0) hrs = 1;
-                        hrs = Math.max(0.5, Math.min(2.0, hrs));
+                        hrs = Math.max(0.5, Math.min(hoursPerDay, hrs));
                         if (hrs > remaining && remaining >= 0.5) hrs = remaining;
                         if (hrs > remaining) return false;
 
@@ -709,8 +790,10 @@ const SyllabusManager = () => {
                             subject: subjectName,
                             unit: t.unit_name || '',
                             topic: t.topic_name || 'Study Topic',
-                            difficulty: diffRank[String(t.difficulty || '').toLowerCase()] || 3,
-                            difficultyLabel: t.difficulty || 'Intermediate',
+                            difficulty: typeof t.difficulty === 'number'
+                                ? Math.max(1, Math.min(5, Math.round(t.difficulty)))
+                                : (diffRank[String(t.difficulty || '').toLowerCase()] || 3),
+                            difficultyLabel: t.difficultyLabel || t.difficulty || 'Intermediate',
                             estimated_hours: hrs,
                             duration: rounded,
                             key_concepts: [],
@@ -1010,14 +1093,14 @@ const SyllabusManager = () => {
                                     <BookOpen className="w-5 h-5 text-primary-600" />
                                     <h2 className="font-bold text-gray-800">Upload Syllabus / Schedule</h2>
                                 </div>
-                                <p className="text-xs text-gray-500 mb-3">PDF preferred. Topics are extracted and used to auto-build your Dashboard schedule.</p>
+                                <p className="text-xs text-gray-500 mb-3">PDF, Word, PowerPoint, text, markdown, and image files are supported. Scanned PDFs are handled through OCR fallback.</p>
                                 <form onSubmit={handleScheduleUpload} className="space-y-3">
                                     <input value={newSubjectName}
                                         onChange={e => setNewSubjectName(e.target.value)}
                                         className="input-field text-sm"
                                         placeholder={selectedSubject ? `${selectedSubject.name} (type to change)` : 'Folder name (e.g. 3rd Year, AIML)'} />
                                     <input ref={schedFileRef} type="file"
-                                        accept=".pdf,.ppt,.pptx,.doc,.docx"
+                                        accept=".pdf,.ppt,.pptx,.doc,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.tiff,.tif,.bmp"
                                         className="block w-full text-sm text-gray-700" />
                                     <button type="submit" disabled={uploadingSchedule}
                                         className="btn-primary w-full inline-flex items-center justify-center space-x-2 disabled:opacity-60">
@@ -1033,7 +1116,7 @@ const SyllabusManager = () => {
                                     <Folder className="w-5 h-5 text-primary-600" />
                                     <h2 className="font-bold text-gray-800">Upload Study Material</h2>
                                 </div>
-                                <p className="text-xs text-gray-500 mb-3">Lecture slides, notes, handouts. Stored in subject/unit folders and used by the AI chatbot.</p>
+                                <p className="text-xs text-gray-500 mb-3">Lecture slides, notes, handouts, text files, and images are supported for chatbot indexing and topic extraction.</p>
                                 <form onSubmit={handleMaterialUpload} className="space-y-3">
                                     <input value={newSubjectName}
                                         onChange={e => setNewSubjectName(e.target.value)}
@@ -1045,7 +1128,7 @@ const SyllabusManager = () => {
                                         className="input-field text-sm"
                                         placeholder="Unit / Module name (e.g. Unit 1, Module 3 — optional)" />
                                     <input ref={matFileRef} type="file"
-                                        accept=".pdf,.ppt,.pptx,.doc,.docx"
+                                        accept=".pdf,.ppt,.pptx,.doc,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.tiff,.tif,.bmp"
                                         className="block w-full text-sm text-gray-700" />
                                     <button type="submit" disabled={uploadingMaterial}
                                         className="btn-secondary w-full inline-flex items-center justify-center space-x-2 disabled:opacity-60">
@@ -1126,6 +1209,7 @@ const SyllabusManager = () => {
                                         processingIds={processingIds}
                                         selectedSubject={selectedSubject}
                                         onExpand={loadAllTopics}
+                                        onSelectFile={loadStudyPreview}
                                         onDelete={handleDelete}
                                         onMarkComplete={handleMarkComplete}
                                         onReschedule={handleRescheduleTopic}
@@ -1156,6 +1240,72 @@ const SyllabusManager = () => {
                                 )}
                             </motion.div>
                         )}
+
+                        <div className="grid lg:grid-cols-2 gap-6">
+                            <div className="card">
+                                <div className="flex items-center justify-between mb-3">
+                                    <div>
+                                        <h2 className="font-bold text-gray-800">Study Summary</h2>
+                                        <p className="text-xs text-gray-500 mt-1">Quick tutor view for the selected file</p>
+                                    </div>
+                                    {studyFile?.id && (
+                                        <button
+                                            type="button"
+                                            onClick={() => agentAPI.openFile(studyFile.id, studyFile.filename).catch(() => {})}
+                                            className="text-sm text-primary-600 hover:text-primary-700 font-medium"
+                                        >
+                                            Open in new tab
+                                        </button>
+                                    )}
+                                </div>
+                                {!studyFile ? (
+                                    <p className="text-sm text-gray-400">Click a file to load a summary and preview.</p>
+                                ) : (
+                                    <div className="space-y-3 text-sm text-gray-700">
+                                        <div className="rounded-xl bg-primary-50 p-3 border border-primary-100">
+                                            <p className="font-medium text-primary-800">{studyFile.filename}</p>
+                                            <p className="text-xs text-primary-700 mt-1">Topics indexed: {studyFile.topicCount || 0}</p>
+                                        </div>
+                                        <div className="rounded-xl border border-gray-100 p-3 bg-gray-50">
+                                            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">What to study first</p>
+                                            <ul className="space-y-1 list-disc list-inside text-gray-700">
+                                                {(fileTopics[studyFile.id]?.subjects?.[0]?.units?.[0]?.topics || studyFile.topics || []).slice(0, 3).map((topic, index) => (
+                                                    <li key={index}>{topic.topic_name || topic.name || topic}</li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="card min-h-[420px]">
+                                <div className="flex items-center justify-between mb-3">
+                                    <div>
+                                        <h2 className="font-bold text-gray-800">Document Preview</h2>
+                                        <p className="text-xs text-gray-500 mt-1">Read the file while you ask questions on the left</p>
+                                    </div>
+                                </div>
+                                {!studyFile ? (
+                                    <div className="h-[360px] rounded-xl border border-dashed border-gray-200 flex items-center justify-center text-gray-400 text-sm">
+                                        Select a file to preview it here.
+                                    </div>
+                                ) : studyPreviewLoading ? (
+                                    <div className="h-[360px] rounded-xl border border-dashed border-gray-200 flex items-center justify-center text-gray-400 text-sm">
+                                        Loading preview…
+                                    </div>
+                                ) : studyPreviewUrl ? (
+                                    <iframe
+                                        title={studyFile.filename}
+                                        src={studyPreviewUrl}
+                                        className="w-full h-[360px] rounded-xl border border-gray-200 bg-white"
+                                    />
+                                ) : (
+                                    <div className="h-[360px] rounded-xl border border-dashed border-gray-200 flex items-center justify-center text-gray-400 text-sm">
+                                        Preview unavailable. Use the open button to view this file.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
 
                         {!selectedSubject && subjects.length > 0 && (
                             <div className="card text-center py-12 text-gray-400">

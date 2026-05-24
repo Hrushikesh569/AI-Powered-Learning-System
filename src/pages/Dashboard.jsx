@@ -6,8 +6,8 @@ import Modal from '../components/Modal';
 import AchievementCard from '../components/AchievementCard';
 import MotivationTips from '../components/MotivationTips';
 import ShapExplanation from '../components/ShapExplanation';
-import { agentAPI } from '../api';
-import { CheckCircle, Clock, AlertCircle, TrendingUp, Calendar, Sparkles, Trophy, FileText, RefreshCw } from 'lucide-react';
+import { agentAPI, getAuthToken } from '../api';
+import { CheckCircle, Clock, AlertCircle, TrendingUp, Calendar, Sparkles, Trophy, FileText, RefreshCw, Trash2 } from 'lucide-react';
 
 
 const formatDate = (date) => {
@@ -19,6 +19,23 @@ const formatDate = (date) => {
 
 const _cleanTopicName = (value) =>
     String(value || '').replace(/ — Day \d+$/, '').replace(/^\[Review\] /, '').trim();
+
+const _normalizeDeadlineItems = (items = []) => {
+    const seen = new Set();
+    return (Array.isArray(items) ? items : [])
+        .map((item) => ({ ...item }))
+        .filter((item) => {
+            const key = item.id ?? `${String(item.due_date || '')}|${String(item.subject || '')}|${String(item.title || '')}|${String(item.source_text || '')}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        })
+        .sort((left, right) => {
+            const leftDate = left.due_date ? new Date(left.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+            const rightDate = right.due_date ? new Date(right.due_date).getTime() : Number.MAX_SAFE_INTEGER;
+            return leftDate - rightDate;
+        });
+};
 
 // ── Persistent task-status helpers (survive page reloads) ─────────────────────
 // Key = "date|cleanTopic" — stable across schedule regenerations.
@@ -47,6 +64,27 @@ const _pickResourceLinks = (resources = []) => {
     const web = resources.find((r) => (r.type || '').toLowerCase() !== 'video');
     const video = resources.find((r) => (r.type || '').toLowerCase() === 'video');
     return { web, video };
+};
+
+const _buildFallbackResourceLinks = (topic, subject = '') => {
+    const cleanTopic = String(topic || '').trim();
+    if (!cleanTopic) return [];
+    const query = [cleanTopic, String(subject || '').trim()].filter(Boolean).join(' ');
+    const encoded = encodeURIComponent(query);
+    return [
+        {
+            title: `Web Search: ${cleanTopic}`,
+            url: `https://www.google.com/search?q=${encoded}`,
+            type: 'web',
+            icon: '🔍',
+        },
+        {
+            title: `YouTube Videos: ${cleanTopic}`,
+            url: `https://www.youtube.com/results?search_query=${encoded}`,
+            type: 'video',
+            icon: '▶️',
+        },
+    ];
 };
 
 const _buildSlotsInWindow = (start = '09:00', end = '21:00', maxSlots = 8) => {
@@ -79,11 +117,149 @@ const _buildSlotsInWindow = (start = '09:00', end = '21:00', maxSlots = 8) => {
     return slots.length ? slots : ['09:00 AM', '11:00 AM', '02:00 PM', '05:00 PM'];
 };
 
+const _defaultTimeSlots = _buildSlotsInWindow('09:00', '21:00', 5);
+
+const _normalizeHiddenEntry = (entry) => {
+    if (typeof entry === 'string') {
+        const subject = String(entry || '').trim();
+        return subject ? { subject, unit: '', topic: '', scope: 'subject' } : null;
+    }
+    if (!entry || typeof entry !== 'object') return null;
+    const subject = String(entry.subject || '').trim();
+    if (!subject) return null;
+    const unit = String(entry.unit || '').trim();
+    const topic = _cleanTopicName(entry.topic || '').trim();
+    const scope = entry.scope || (topic ? 'topic' : unit ? 'unit' : 'subject');
+    return { subject, unit, topic, scope };
+};
+
+const _loadHiddenEntries = () => {
+    try {
+        const raw = JSON.parse(localStorage.getItem('hiddenStudyItems') || '[]');
+        const normalized = Array.isArray(raw) ? raw.map(_normalizeHiddenEntry).filter(Boolean) : [];
+        if (normalized.length) return normalized;
+    } catch (_) {}
+
+    try {
+        const legacy = JSON.parse(localStorage.getItem('hiddenSubjects') || '[]');
+        if (!Array.isArray(legacy)) return [];
+        return legacy.map((subject) => _normalizeHiddenEntry(subject)).filter(Boolean);
+    } catch (_) {
+        return [];
+    }
+};
+
+const _hiddenEntryKey = (entry) => {
+    const item = _normalizeHiddenEntry(entry);
+    if (!item) return '';
+    return `${item.subject}|||${item.unit || ''}|||${item.topic || ''}`;
+};
+
+const _taskMatchesHiddenEntry = (task, hiddenEntry) => {
+    const item = _normalizeHiddenEntry(hiddenEntry);
+    if (!item) return false;
+    const taskSubject = String(task?.subject || '').trim();
+    const taskUnit = String(task?.unit || '').trim();
+    const taskTopic = _cleanTopicName(task?.topic || '').trim();
+    if (!taskSubject || taskSubject !== item.subject) return false;
+    if (item.unit && taskUnit !== item.unit) return false;
+    if (item.topic && taskTopic !== item.topic) return false;
+    return true;
+};
+
+const _isTaskHidden = (task, hiddenEntries = []) =>
+    (hiddenEntries || []).some((entry) => _taskMatchesHiddenEntry(task, entry));
+
+const _removeHiddenEntriesForSelection = (hiddenEntries, selection) => {
+    const selected = _normalizeHiddenEntry(selection);
+    if (!selected) return hiddenEntries;
+    return hiddenEntries.filter((entry) => {
+        const item = _normalizeHiddenEntry(entry);
+        if (!item || item.subject !== selected.subject) return true;
+        if (selected.topic) return !( (!item.unit || item.unit === selected.unit) && (!item.topic || item.topic === selected.topic) );
+        if (selected.unit) return !( !item.unit || item.unit === selected.unit );
+        return false;
+    });
+};
+
+const _groupHiddenEntries = (entries = []) => {
+    const grouped = {};
+    (entries || []).map(_normalizeHiddenEntry).filter(Boolean).forEach((entry) => {
+        if (!grouped[entry.subject]) grouped[entry.subject] = { subject: entry.subject, units: {} };
+        const unitName = entry.unit || 'General';
+        if (!grouped[entry.subject].units[unitName]) grouped[entry.subject].units[unitName] = [];
+        grouped[entry.subject].units[unitName].push(entry);
+    });
+    return Object.values(grouped).map((subject) => ({
+        ...subject,
+        units: Object.entries(subject.units).map(([unitName, items]) => ({ unitName, items })),
+    }));
+};
+
 const _buildMixedScheduleFromBackend = async ({
     todayIso,
     preferredTopics = [],
     hiddenSubjects = [],
+    hoursPerDay = 3,
+    fallbackHierarchy = [],
 }) => {
+    try {
+        const token = localStorage.getItem('authToken');
+        const intelligent = await agentAPI.getIntelligentSchedule({
+            hours_per_day: Number(hoursPerDay) || 3,
+            num_days: 60,
+            cross_subject: true,
+        }, token);
+        const schedule = intelligent?.schedule || [];
+        if (schedule.length) {
+            const preferredSet = new Set((preferredTopics || []).map(_cleanTopicName).filter(Boolean));
+            const filtered = schedule
+                .filter((row) => !_isTaskHidden(row, hiddenSubjects))
+                .sort((a, b) => {
+                    const aDate = String(a.date || todayIso).slice(0, 10);
+                    const bDate = String(b.date || todayIso).slice(0, 10);
+                    if (aDate !== bDate) return aDate.localeCompare(bDate);
+                    const aUnitIndex = Number.isFinite(Number(a.unit_number)) ? Number(a.unit_number) : Number(a.unit_index ?? 0);
+                    const bUnitIndex = Number.isFinite(Number(b.unit_number)) ? Number(b.unit_number) : Number(b.unit_index ?? 0);
+                    if (aUnitIndex !== bUnitIndex) return aUnitIndex - bUnitIndex;
+                    const aTopicIndex = Number.isFinite(Number(a.topic_index)) ? Number(a.topic_index) : 0;
+                    const bTopicIndex = Number.isFinite(Number(b.topic_index)) ? Number(b.topic_index) : 0;
+                    if (aTopicIndex !== bTopicIndex) return aTopicIndex - bTopicIndex;
+                    const aPreferred = preferredSet.has(_cleanTopicName(a.topic));
+                    const bPreferred = preferredSet.has(_cleanTopicName(b.topic));
+                    if (aPreferred !== bPreferred) return aPreferred ? -1 : 1;
+                    const aSubject = String(a.subject || '');
+                    const bSubject = String(b.subject || '');
+                    if (aSubject !== bSubject) return aSubject.localeCompare(bSubject);
+                    return String(a.time || '').localeCompare(String(b.time || ''));
+                })
+                .map((item) => ({
+                    id: item.id,
+                    scheduled_topic_id: item.id,
+                    date: String(item.date || todayIso).slice(0, 10),
+                    time: item.time || _defaultTimeSlots[0],
+                    subject: item.subject || 'General',
+                    subject_code: item.subject_code || '',
+                    unit: item.unit || item.unit_name || '',
+                    topic: item.topic || item.topic_name || 'Study Topic',
+                    unit_number: Number.isFinite(Number(item.unit_number)) ? Number(item.unit_number) : Number(item.unit_index ?? 0),
+                    difficulty: item.difficulty,
+                    difficultyLabel: item.difficultyLabel || item.difficulty_label || '',
+                    estimated_hours: Number(item.estimated_hours || 1),
+                    duration: item.duration || (Number(item.estimated_hours || 1) < 1 ? `${Math.round(Number(item.estimated_hours || 1) * 60)} min` : `${Number(item.estimated_hours || 1).toFixed(1)} hour${Number(item.estimated_hours || 1) === 1 ? '' : 's'}`),
+                    key_concepts: item.key_concepts || [],
+                    is_foundational: Boolean(item.is_foundational),
+                    status: item.status || 'pending',
+                    completed_date: item.completed_date || null,
+                    unit_index: Number.isFinite(Number(item.unit_index)) ? Number(item.unit_index) : Number(item.unit_number ?? 0),
+                    topic_index: Number.isFinite(Number(item.topic_index)) ? Number(item.topic_index) : 0,
+                    user_override: Boolean(item.custom_added),
+                    custom_added: Boolean(item.custom_added),
+                }));
+            if (filtered.length) return filtered;
+        }
+    } catch (_) {}
+
     let rows = [];
     try {
         const rowsRes = await agentAPI.queryScheduledTopics({});
@@ -92,55 +268,178 @@ const _buildMixedScheduleFromBackend = async ({
         rows = [];
     }
 
+    if (!rows.length && Array.isArray(fallbackHierarchy) && fallbackHierarchy.length) {
+        rows = fallbackHierarchy.flatMap((subject) =>
+            (subject.units || []).flatMap((unit) =>
+                (unit.topics || []).map((topic) => ({
+                    id: `${subject.subject_name || 'subject'}-${unit.unit_name || 'unit'}-${topic.name || 'topic'}`,
+                    subject: subject.subject_name || 'General',
+                    subject_code: subject.subject_code || '',
+                    unit_name: unit.unit_name || '',
+                    topic_name: topic.name || 'Study Topic',
+                    estimated_hours: topic.est_hours || topic.estimated_hours || 1,
+                    difficulty: topic.difficulty || 3,
+                    status: 'pending',
+                })),
+            ),
+        );
+    }
+
     if (!rows.length) return [];
 
-    const hiddenSet = new Set((hiddenSubjects || []).filter(Boolean));
-    const preferredSet = new Set((preferredTopics || []).map(_cleanTopicName).filter(Boolean));
-    if (hiddenSet.size) rows = rows.filter((r) => !hiddenSet.has(r.subject || 'General'));
+    const uniqueSubjects = [...new Set(rows.map((row) => row.subject || 'General'))];
+    const hierarchySubjects = Array.isArray(fallbackHierarchy)
+        ? [...new Set(fallbackHierarchy.map((subject) => subject.subject_name).filter(Boolean))]
+        : [];
+    if (rows.length > 0 && uniqueSubjects.length <= 1 && hierarchySubjects.length > 1) {
+        rows = fallbackHierarchy.flatMap((subject) =>
+            (subject.units || []).flatMap((unit) =>
+                (unit.topics || []).map((topic) => ({
+                    id: `${subject.subject_name || 'subject'}-${unit.unit_name || 'unit'}-${topic.name || 'topic'}`,
+                    subject: subject.subject_name || 'General',
+                    subject_code: subject.subject_code || '',
+                    unit_name: unit.unit_name || '',
+                    topic_name: topic.name || 'Study Topic',
+                    estimated_hours: topic.est_hours || topic.estimated_hours || 1,
+                    difficulty: topic.difficulty || 3,
+                    status: 'pending',
+                })),
+            ),
+        );
+    }
+
+    if (Array.isArray(hiddenSubjects) && hiddenSubjects.length) rows = rows.filter((row) => !_isTaskHidden(row, hiddenSubjects));
     if (!rows.length) return [];
 
     const diffRank = { easy: 1, basic: 2, intermediate: 3, medium: 3, hard: 4, advanced: 5 };
+    const diffLabelByRank = ['', 'Easy', 'Basic', 'Intermediate', 'Hard', 'Advanced'];
+    const dayBudget = Math.max(1, Number(hoursPerDay) || 3);
+    const clampHours = (value) => {
+        let hrs = Number(value || 1);
+        if (!Number.isFinite(hrs) || hrs <= 0) hrs = 1;
+        return Math.max(0.5, Math.min(2.5, hrs));
+    };
 
-    return [...rows]
+    const normalizedDifficulty = (value) => {
+        if (typeof value === 'number') return Math.max(1, Math.min(5, value));
+        const mapped = diffRank[String(value || '').toLowerCase()];
+        return mapped || 3;
+    };
+
+    const buildItem = (t, assignedDate, slotIndex, queueIndex = 0, queueTotal = 1) => {
+        const difficultyValue = normalizedDifficulty(t.difficulty);
+        const hrs = clampHours(t.estimated_hours);
+        const rawDifficultyLabel = String(t.difficultyLabel || '').trim();
+        const fallbackDifficultyLabel = diffLabelByRank[difficultyValue] || String(t.difficulty || 'Intermediate');
+        return {
+            id: t.id,
+            scheduled_topic_id: t.id,
+            date: assignedDate,
+            time: _defaultTimeSlots[slotIndex % _defaultTimeSlots.length],
+            subject: t.subject || 'General',
+            unit: t.unit_name || '',
+            topic: t.topic_name || 'Study Topic',
+            difficulty: difficultyValue,
+            difficultyLabel: rawDifficultyLabel || fallbackDifficultyLabel,
+            estimated_hours: hrs,
+            duration: hrs < 1 ? `${Math.round(hrs * 60)} min` : `${hrs.toFixed(1)} hour${hrs === 1 ? '' : 's'}`,
+            key_concepts: [],
+            is_foundational: false,
+            status: t.status || 'pending',
+            completed_date: t.completed_date || null,
+            user_override: Boolean(t.custom_added),
+        };
+    };
+
+    const explicitRows = rows.filter((row) => row.rescheduled_date || row.scheduled_date);
+    const flexRows = rows.filter((row) => !(row.rescheduled_date || row.scheduled_date));
+    const explicitDates = explicitRows
+        .map((row) => String(row.rescheduled_date || row.scheduled_date || todayIso).slice(0, 10))
+        .filter(Boolean)
+        .sort();
+    const startDate = new Date(`${(explicitDates.at(-1) || todayIso)}T00:00:00`);
+    if (!explicitDates.length || startDate < new Date(`${todayIso}T00:00:00`)) {
+        startDate.setTime(new Date(`${todayIso}T00:00:00`).getTime());
+    } else {
+        startDate.setDate(startDate.getDate() + 1);
+    }
+
+    const scheduled = explicitRows
         .sort((a, b) => {
-            const aPreferred = preferredSet.has(_cleanTopicName(a.topic_name));
-            const bPreferred = preferredSet.has(_cleanTopicName(b.topic_name));
-            if (aPreferred !== bPreferred) return aPreferred ? -1 : 1;
-
-            const aDate = a.rescheduled_date || a.scheduled_date || todayIso;
-            const bDate = b.rescheduled_date || b.scheduled_date || todayIso;
+            const aDate = String(a.rescheduled_date || a.scheduled_date || todayIso).slice(0, 10);
+            const bDate = String(b.rescheduled_date || b.scheduled_date || todayIso).slice(0, 10);
             if (aDate !== bDate) return aDate.localeCompare(bDate);
-
-            const da = diffRank[String(a.difficulty || '').toLowerCase()] || 3;
-            const db = diffRank[String(b.difficulty || '').toLowerCase()] || 3;
+            const da = normalizedDifficulty(a.difficulty);
+            const db = normalizedDifficulty(b.difficulty);
             if (db !== da) return db - da;
-
             return Number(b.estimated_hours || 1) - Number(a.estimated_hours || 1);
         })
-        .map((t, index) => {
-            let hrs = Number(t.estimated_hours || 1);
-            if (!Number.isFinite(hrs) || hrs <= 0) hrs = 1;
-            hrs = Math.max(0.5, Math.min(2.5, hrs));
-            return {
-                id: t.id,
-                scheduled_topic_id: t.id,
-                date: (t.rescheduled_date || t.scheduled_date || todayIso).slice(0, 10),
-                time: `Task ${index + 1}`,
-                subject: t.subject || 'General',
-                unit: t.unit_name || '',
-                topic: t.topic_name || 'Study Topic',
-                difficulty: diffRank[String(t.difficulty || '').toLowerCase()] || 3,
-                difficultyLabel: t.difficulty || 'Intermediate',
-                estimated_hours: hrs,
-                duration: hrs < 1 ? `${Math.round(hrs * 60)} min` : `${hrs.toFixed(1)} hour${hrs === 1 ? '' : 's'}`,
-                key_concepts: [],
-                is_foundational: false,
-                status: t.status || 'pending',
-                completed_date: t.completed_date || null,
-            };
-        });
-};
+        .map((t, index) => buildItem(t, String(t.rescheduled_date || t.scheduled_date || todayIso).slice(0, 10), index));
 
+    const subjectQueues = new Map();
+    for (const row of flexRows) {
+        const subject = row.subject || 'General';
+        if (!subjectQueues.has(subject)) subjectQueues.set(subject, []);
+        subjectQueues.get(subject).push(row);
+    }
+
+    const subjectNames = [...subjectQueues.keys()];
+
+    for (const [subject, queue] of subjectQueues.entries()) {
+        subjectQueues.set(subject, queue);
+    }
+
+    const mixedSchedule = [];
+    let cursorDate = startDate;
+    let dayIndex = 0;
+
+    while (subjectNames.some((subject) => (subjectQueues.get(subject) || []).length)) {
+        let dailyRemaining = dayBudget;
+        let slotIndex = 0;
+        const rotationStart = subjectNames.length ? dayIndex % subjectNames.length : 0;
+
+        for (let offset = 0; offset < subjectNames.length; offset += 1) {
+            const subject = subjectNames[(rotationStart + offset) % subjectNames.length];
+            const queue = subjectQueues.get(subject) || [];
+            if (!queue.length) continue;
+
+            const candidate = queue[0];
+            const hrs = clampHours(candidate.estimated_hours);
+            if (hrs > dailyRemaining && dailyRemaining >= 0.5) continue;
+
+            queue.shift();
+            mixedSchedule.push(buildItem(candidate, formatDate(cursorDate), slotIndex));
+            dailyRemaining -= hrs;
+            slotIndex += 1;
+        }
+
+        let madeProgress = true;
+        while (dailyRemaining >= 0.5 && madeProgress) {
+            madeProgress = false;
+            for (let offset = 0; offset < subjectNames.length; offset += 1) {
+                const subject = subjectNames[(rotationStart + offset) % subjectNames.length];
+                const queue = subjectQueues.get(subject) || [];
+                if (!queue.length) continue;
+
+                const candidate = queue[0];
+                const hrs = clampHours(candidate.estimated_hours);
+                if (hrs > dailyRemaining && dailyRemaining >= 0.5) continue;
+
+                queue.shift();
+                mixedSchedule.push(buildItem(candidate, formatDate(cursorDate), slotIndex));
+                dailyRemaining -= hrs;
+                slotIndex += 1;
+                madeProgress = true;
+                break;
+            }
+        }
+
+        cursorDate.setDate(cursorDate.getDate() + 1);
+        dayIndex += 1;
+    }
+
+    return [...scheduled, ...mixedSchedule];
+};
 const _withTimeout = async (promise, ms = 12000, fallback = null) => {
     let timer;
     try {
@@ -177,9 +476,15 @@ const Dashboard = () => {
     const [timeModal, setTimeModal] = useState(null); // { task, addAmount, addUnit } when open
     const [topicMaterials, setTopicMaterials] = useState({}); // topic → [{filename, page, ...}]
     const [topicResources, setTopicResources] = useState({}); // topic → [{title,url,type,...}]
+    const [deadlineItems, setDeadlineItems] = useState([]);
+    const [deadlineText, setDeadlineText] = useState('');
+    const [deadlineTextSubject, setDeadlineTextSubject] = useState('');
+    const [deadlineTextLoading, setDeadlineTextLoading] = useState(false);
     const [topicPicker, setTopicPicker] = useState(false); // show "add topic today" modal
+    const [topicPickerMode, setTopicPickerMode] = useState('syllabus');
     const [topicPickerSubject, setTopicPickerSubject] = useState(''); // selected subject in picker
     const [topicPickerUnit, setTopicPickerUnit] = useState(''); // selected unit in picker
+    const [topicPickerTopic, setTopicPickerTopic] = useState(''); // selected topic in picker
     const [subjectHierarchy, setSubjectHierarchy] = useState([]); // backend hierarchy for picker
     const [preferredTopics, setPreferredTopics] = useState(() => {
         try {
@@ -191,20 +496,13 @@ const Dashboard = () => {
         }
     });
     const [preferredTopicDraft, setPreferredTopicDraft] = useState('');
-    const [hiddenSubjects, setHiddenSubjects] = useState(() => {
-        try {
-            const raw = localStorage.getItem('hiddenSubjects') || '[]';
-            const parsed = JSON.parse(raw);
-            return Array.isArray(parsed) ? parsed : [];
-        } catch (_) {
-            return [];
-        }
-    });
+    const [hiddenSubjects, setHiddenSubjects] = useState(() => _loadHiddenEntries());
     const [rebuildingSchedule, setRebuildingSchedule] = useState(false);
     const [customTopicName, setCustomTopicName] = useState('');
     const [customTopicSubject, setCustomTopicSubject] = useState('');
     const [customTopicDuration, setCustomTopicDuration] = useState('1');
     const [customTopicLoading, setCustomTopicLoading] = useState(false);
+    const [calendarInitialized, setCalendarInitialized] = useState(false);
 
     const mergeWithPastHistory = (freshList) => {
         let existing = [];
@@ -226,12 +524,81 @@ const Dashboard = () => {
         });
     };
 
+    const carryForwardMissedTopics = (list) => {
+        const base = list.map((task) => ({ ...task }));
+        const fallbackSlots = ['09:00 AM', '11:00 AM', '02:00 PM', '05:00 PM', '08:00 PM'];
+        const cloned = [];
+        const seenCarry = new Set();
+
+        const hasSameTopic = (items, candidate) => items.some((item) =>
+            item.date === candidate.date &&
+            _cleanTopicName(item.topic) === _cleanTopicName(candidate.topic) &&
+            (item.subject || '') === (candidate.subject || '') &&
+            (item.unit || '') === (candidate.unit || '') &&
+            (item.status || 'pending') !== 'later'
+        );
+
+        const countOnDate = (items, date) => items.filter((item) => item.date === date && (item.status || 'pending') !== 'later').length;
+
+        for (const task of base) {
+            const isPastPending = task.date && task.date < todayIso && (task.status || 'pending') === 'pending';
+            if (!isPastPending) continue;
+
+            const carryKey = `${task.date}|${_cleanTopicName(task.topic)}|${task.subject || ''}|${task.unit || ''}`;
+            if (seenCarry.has(carryKey)) continue;
+            seenCarry.add(carryKey);
+
+            _saveStatus(task, 'missed');
+            task.status = 'missed';
+
+            const sourceDate = new Date(`${task.date}T00:00:00`);
+            let targetDate = new Date(sourceDate);
+            targetDate.setDate(targetDate.getDate() + 1);
+            let targetIso = formatDate(targetDate);
+            for (let i = 0; i < 14; i += 1) {
+                const candidateDate = new Date(sourceDate);
+                candidateDate.setDate(candidateDate.getDate() + 1 + i);
+                const candidateIso = formatDate(candidateDate);
+                if (countOnDate([...base, ...cloned], candidateIso) < 5) {
+                    targetIso = candidateIso;
+                    break;
+                }
+            }
+
+            const usedSlots = new Set([...base, ...cloned].filter((item) => item.date === targetIso).map((item) => item.time));
+            const freeSlot = fallbackSlots.find((slot) => !usedSlots.has(slot)) || fallbackSlots[0];
+            const clone = {
+                ...task,
+                id: Date.now() + cloned.length + 1,
+                date: targetIso,
+                time: freeSlot,
+                status: 'pending',
+                user_override: true,
+                carriedForwardOf: carryKey,
+            };
+            _saveStatus(clone, 'pending');
+            cloned.push(clone);
+        }
+
+        return [...base, ...cloned].sort((a, b) => {
+            if ((a.date || '') !== (b.date || '')) return (a.date || '').localeCompare(b.date || '');
+            return String(a.time || '').localeCompare(String(b.time || ''));
+        });
+    };
+
     useEffect(() => {
         try { localStorage.setItem('preferredTopics', JSON.stringify(preferredTopics)); } catch (_) {}
     }, [preferredTopics]);
 
     useEffect(() => {
-        try { localStorage.setItem('hiddenSubjects', JSON.stringify(hiddenSubjects)); } catch (_) {}
+        const normalized = (hiddenSubjects || []).map(_normalizeHiddenEntry).filter(Boolean);
+        try { localStorage.setItem('hiddenStudyItems', JSON.stringify(normalized)); } catch (_) {}
+        try {
+            localStorage.setItem(
+                'hiddenSubjects',
+                JSON.stringify([...new Set(normalized.map((item) => item.subject).filter(Boolean))]),
+            );
+        } catch (_) {}
     }, [hiddenSubjects]);
 
     useEffect(() => {
@@ -263,66 +630,73 @@ const Dashboard = () => {
                     if (stored) prefs = { ...prefs, ...JSON.parse(stored) };
                 } catch (_) {}
 
-                let hierarchy = [];
-                try {
-                    const hierarchyRes = await _withTimeout(agentAPI.getSubjectHierarchy(), 8000, { hierarchy: [] });
-                    hierarchy = hierarchyRes?.hierarchy || [];
-                    setSubjectHierarchy(hierarchy);
-                } catch (_) {
-                    setSubjectHierarchy([]);
-                }
-
-                let backendTasks = [];
-                try {
-                    backendTasks = await _withTimeout(_buildMixedScheduleFromBackend({
-                        todayIso,
-                        preferredTopics,
-                        hiddenSubjects,
-                    }), 12000, []);
-                } catch (_) {}
-
-                let storedCustomTasks = [];
+                let storedSchedule = [];
                 try {
                     const raw = JSON.parse(localStorage.getItem('generatedSchedule') || '[]');
-                    storedCustomTasks = Array.isArray(raw)
-                        ? raw.filter((task) => task.user_override === true)
-                        : [];
+                    storedSchedule = Array.isArray(raw) ? raw : [];
                 } catch (_) {
-                    storedCustomTasks = [];
+                    storedSchedule = [];
                 }
 
-                const syllabusExists = hierarchy.length > 0 || backendTasks.length > 0;
-                const freshTasks = syllabusExists ? backendTasks : [];
-                const combined = _applyStatuses([
-                    ...freshTasks,
-                    ...storedCustomTasks.filter((task) => !hiddenSubjects.includes(task.subject || '')),
-                ]);
-                const pastPending = combined.filter((t) => t.date < todayIso && (t.status || 'pending') === 'pending');
-                if (pastPending.length > 0) {
-                    const s = _loadStatuses();
-                    pastPending.forEach((t) => { s[_taskKey(t)] = 'missed'; });
-                    localStorage.setItem('taskStatuses', JSON.stringify(s));
+                if (storedSchedule.length > 0) {
+                    const combined = _applyStatuses([...storedSchedule]);
+                    const merged = carryForwardMissedTopics(mergeWithPastHistory(combined));
+                    setTasks(merged);
+                    try { localStorage.setItem('generatedSchedule', JSON.stringify(merged)); } catch (_) {}
+                    setLoading(false);
                 }
-                const finalTasks = combined.map((t) =>
-                    pastPending.some((p) => _taskKey(p) === _taskKey(t)) ? { ...t, status: 'missed' } : t,
+
+                const token = getAuthToken();
+                const profileRes = await _withTimeout(agentAPI.getMe(token), 8000, null).catch(() => null);
+
+                const studyHours = Math.max(
+                    0.5,
+                    Number(profileRes?.studyHoursPerDay ?? prefs.studyHours ?? 3) || 3,
                 );
-                const merged = mergeWithPastHistory(finalTasks);
-                setTasks(merged);
-                try { localStorage.setItem('generatedSchedule', JSON.stringify(merged)); } catch (_) {}
+                prefs = { ...prefs, studyHours };
+                try {
+                    localStorage.setItem('learningPreferences', JSON.stringify({
+                        ...prefs,
+                        studyHours,
+                        studyHoursPerDay: studyHours,
+                    }));
+                } catch (_) {}
 
-                if (!syllabusExists && storedCustomTasks.length === 0) {
-                    try {
-                        localStorage.setItem('generatedSchedule', JSON.stringify(merged.filter((task) => task.user_override === true)));
-                    } catch (_) {}
+                const [hierarchyRes, progressRes, deadlinesRes] = await Promise.all([
+                    _withTimeout(agentAPI.getSubjectHierarchy(), 8000, { hierarchy: [] }).catch(() => ({ hierarchy: [] })),
+                    _withTimeout(agentAPI.getProgressDashboard(token), 8000, null).catch(() => null),
+                    _withTimeout(agentAPI.getDeadlines({}, token), 8000, { deadlines: [] }).catch(() => ({ deadlines: [] })),
+                ]);
+
+                const hierarchy = hierarchyRes?.hierarchy || [];
+                setSubjectHierarchy(hierarchy);
+
+                const backendTasks = await _withTimeout(_buildMixedScheduleFromBackend({
+                    todayIso,
+                    preferredTopics,
+                    hiddenSubjects,
+                    hoursPerDay: studyHours,
+                    fallbackHierarchy: hierarchy,
+                }), 12000, []);
+
+                let progressTaskSource = [];
+
+                if (backendTasks.length > 0) {
+                    const combined = _applyStatuses([...backendTasks]);
+                    const merged = carryForwardMissedTopics(mergeWithPastHistory(combined));
+                    setTasks(merged);
+                    try { localStorage.setItem('generatedSchedule', JSON.stringify(merged)); } catch (_) {}
+                    progressTaskSource = merged;
+                } else if (!storedSchedule.length) {
+                    setTasks([]);
+                } else {
+                    progressTaskSource = carryForwardMissedTopics(mergeWithPastHistory(_applyStatuses([...storedSchedule])));
                 }
 
-                // Fetch progress dashboard data from backend
-                const progressRes = await _withTimeout(agentAPI.getProgressDashboard(), 8000, null);
                 const safeProgress = progressRes || {};
                 setWeeklyProgress(safeProgress.weeklyProgress || { percentage: 0, completedHours: 0, totalHours: 0, streak: 0 });
-                // Fetch AI suggestions from backend
+                setDeadlineItems(_normalizeDeadlineItems(deadlinesRes?.deadlines || []));
                 setAiSuggestions(safeProgress.suggestions || []);
-                // Fetch motivational quotes and achievements
                 setMotivationalQuotes(safeProgress.motivationalQuotes || []);
                 setAchievements(safeProgress.achievements || []);
             } catch (err) {
@@ -334,6 +708,28 @@ const Dashboard = () => {
         };
         fetchData();
     }, [preferredTopics, hiddenSubjects]);
+
+    useEffect(() => {
+        const refreshLiveProgress = async () => {
+            try {
+                const token = getAuthToken();
+                const [progressRes, deadlinesRes] = await Promise.all([
+                    _withTimeout(agentAPI.getProgressDashboard(token), 8000, null).catch(() => null),
+                    _withTimeout(agentAPI.getDeadlines({}, token), 8000, { deadlines: [] }).catch(() => ({ deadlines: [] })),
+                ]);
+                const safeProgress = progressRes || {};
+                setWeeklyProgress(safeProgress.weeklyProgress || { percentage: 0, completedHours: 0, totalHours: 0, streak: 0 });
+                setDeadlineItems(_normalizeDeadlineItems(deadlinesRes?.deadlines || []));
+                setAiSuggestions(safeProgress.suggestions || []);
+                setMotivationalQuotes(safeProgress.motivationalQuotes || []);
+                setAchievements(safeProgress.achievements || []);
+            } catch (_) {}
+        };
+
+        refreshLiveProgress();
+        const intervalId = setInterval(refreshLiveProgress, 60000);
+        return () => clearInterval(intervalId);
+    }, []);
 
     // Recompute the list of days whenever the visible month changes
     useEffect(() => {
@@ -348,12 +744,31 @@ const Dashboard = () => {
         setCalendarDays(days);
     }, [currentMonth]);
 
-    // Ensure selectedDate always belongs to the current month (default to today or first day)
+    // Ensure selectedDate defaults to today and stays within the visible month.
+    useEffect(() => {
+        if (!calendarDays.length || calendarInitialized) return;
+
+        const todayInMonth = calendarDays.find((d) => d === todayIso);
+        if (todayInMonth) {
+            setSelectedDate(todayInMonth);
+        } else {
+            setCurrentMonth(new Date(new Date(todayIso).getFullYear(), new Date(todayIso).getMonth(), 1));
+            setSelectedDate(calendarDays[0] || todayIso);
+        }
+        setCalendarInitialized(true);
+    }, [calendarDays, todayIso, calendarInitialized]);
+
     useEffect(() => {
         if (!calendarDays.length) return;
         if (calendarDays.includes(selectedDate)) return;
+
         const todayInMonth = calendarDays.find((d) => d === todayIso);
-        setSelectedDate(todayInMonth || calendarDays[0]);
+        if (todayInMonth) {
+            setSelectedDate(todayInMonth);
+            return;
+        }
+
+        setSelectedDate(calendarDays[0]);
     }, [calendarDays, selectedDate, todayIso]);
 
     const randomQuote = motivationalQuotes.length
@@ -469,12 +884,23 @@ const Dashboard = () => {
         try {
             const prefs = JSON.parse(localStorage.getItem('learningPreferences') || '{}');
             const stressLevel = parseFloat(localStorage.getItem('stressLevel') || '0.3');
+            const currentSchedule = JSON.parse(localStorage.getItem('generatedSchedule') || '[]');
+            const skippedTopics = currentSchedule
+                .filter((task) => String(task.status || '').toLowerCase() === 'skipped')
+                .map((task) => task.topic || task.subject || task.name)
+                .filter(Boolean);
+            const doLaterTopics = currentSchedule
+                .filter((task) => String(task.status || '').toLowerCase() === 'later')
+                .map((task) => task.topic || task.subject || task.name)
+                .filter(Boolean);
             const total = completedTopics.length + missedTopics.length;
             const performanceScore = total > 0 ? completedTopics.length / total : 0.7;
 
             const res = await agentAPI.getAdaptiveSchedule({
                 completed_topics: completedTopics,
                 missed_topics: missedTopics,
+                skipped_topics: skippedTopics,
+                do_later_topics: doLaterTopics,
                 hours_per_day: Number(prefs.studyHours) || 3,
                 num_days: 30,
                 stress_level: stressLevel,
@@ -524,10 +950,39 @@ const Dashboard = () => {
         5: 'bg-red-100 text-red-700',
     };
 
+    const _inferDifficultyFromTopic = (topicName = '') => {
+        const n = String(topicName || '').toLowerCase();
+        if (['proof', 'derivation', 'theorem', 'optimization', 'backpropagation', 'transformer', 'attention mechanism', 'bert', 'gpt', 'eigenvector', 'byzantine', 'paxos', 'raft', 'consensus', 'distributed consensus', 'variational', 'monte carlo', 'expectation maximization', 'hmm', 'conditional random field', 'crf', 'lstm', 'gru', 'gan'].some((k) => n.includes(k))) return 5;
+        if (['neural network', 'deep learning', 'convolutional', 'recurrent', 'gradient descent', 'regularization', 'convolution', 'dependency parsing', 'word embeddings', 'word2vec', 'glove', 'transformer architecture', 'language model', 'cloud architecture', 'kubernetes', 'distributed', 'machine learning algorithm', 'reinforcement learning'].some((k) => n.includes(k))) return 4;
+        if (['introduction', 'overview', 'basics', 'fundamentals', 'what is', 'history', 'motivation', 'simple', 'linear regression', 'classification', 'supervised', 'unsupervised', 'tokenization', 'stemming', 'lemmatization'].some((k) => n.includes(k))) return 2;
+        if (['definition', 'prerequisites', 'course overview', 'syllabus review', 'setup', 'installation', 'getting started'].some((k) => n.includes(k))) return 1;
+        return null;
+    };
+
+    const _normalizeDifficultyValue = (value) => {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return Math.max(1, Math.min(5, Math.round(value)));
+        }
+        const mapped = {
+            easy: 1,
+            basic: 2,
+            beginner: 2,
+            intermediate: 3,
+            medium: 3,
+            hard: 4,
+            advanced: 5,
+        }[String(value || '').trim().toLowerCase()];
+        return mapped || null;
+    };
+
     const getDifficultyBadge = (task) => {
-        if (!task.difficulty) return null;
-        const color = DIFF_COLORS[task.difficulty] || 'bg-gray-100 text-gray-600';
-        const label = task.difficultyLabel || ['', 'Easy', 'Basic', 'Intermediate', 'Hard', 'Advanced'][task.difficulty] || '';
+        const inferred = _inferDifficultyFromTopic(task.topic);
+        const difficultyValue = inferred || _normalizeDifficultyValue(task.difficulty);
+        if (!difficultyValue) return null;
+        const color = DIFF_COLORS[difficultyValue] || 'bg-gray-100 text-gray-600';
+        const rawLabel = String(task.difficultyLabel || '').trim();
+        const fallbackLabel = ['', 'Easy', 'Basic', 'Intermediate', 'Hard', 'Advanced'][difficultyValue] || String(task.difficulty || '');
+        const label = rawLabel === 'Intermediate' && inferred ? ['', 'Easy', 'Basic', 'Intermediate', 'Hard', 'Advanced'][inferred] : (rawLabel || fallbackLabel);
         return (
             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${color}`}>
                 {label}
@@ -651,13 +1106,17 @@ const Dashboard = () => {
 
     // User override: add a specific subject/unit/topic to today's schedule
     const addTopicToToday = ({ subject, subjectCode, unit, topic, difficulty, estimatedHours, resources = [] }) => {
+        const normalizedSelection = _normalizeHiddenEntry({ subject, unit, topic });
+        if (normalizedSelection) {
+            setHiddenSubjects((prev) => _removeHiddenEntriesForSelection(prev, normalizedSelection));
+        }
         const usedSlots = new Set(
             tasks.filter((t) => t.date === todayIso).map((t) => t.time)
         );
         const fallbackSlots = ['09:00 AM', '11:00 AM', '02:00 PM', '05:00 PM', '08:00 PM'];
         const freeSlot = fallbackSlots.find((s) => !usedSlots.has(s)) || '12:00 PM';
         const diff = difficulty || 3;
-        const hours = estimatedHours || (diff <= 2 ? 0.5 : diff <= 3 ? 1.0 : 2.0);
+        const hours = Math.max(0.5, Math.min(studyHoursPerDay, estimatedHours || (diff <= 2 ? 0.5 : diff <= 3 ? 1.0 : 2.0)));
         const durationStr = hours < 1 ? `${Math.round(hours * 60)}min` : `${hours}h`;
         const newTask = {
             id: Date.now(),
@@ -682,8 +1141,36 @@ const Dashboard = () => {
             setTopicResources((prev) => ({ ...prev, [topic]: resources }));
         }
         setTopicPicker(false);
+        setTopicPickerMode('syllabus');
         setTopicPickerSubject('');
         setTopicPickerUnit('');
+        setTopicPickerTopic('');
+        setCustomTopicName('');
+        setCustomTopicSubject('');
+        setCustomTopicDuration('1');
+    };
+
+    const hideSelection = () => {
+        if (!topicPickerSubject) return;
+        const normalizedSelection = _normalizeHiddenEntry({
+            subject: topicPickerSubject,
+            unit: topicPickerUnit,
+            topic: topicPickerTopic,
+        });
+        if (!normalizedSelection) return;
+
+        setHiddenSubjects((prev) => {
+            const normalizedPrev = (prev || []).map(_normalizeHiddenEntry).filter(Boolean);
+            const next = [...normalizedPrev, normalizedSelection];
+            const deduped = [...new Map(next.map((entry) => [_hiddenEntryKey(entry), entry])).values()];
+            return deduped;
+        });
+
+        setTopicPicker(false);
+        setTopicPickerMode('syllabus');
+        setTopicPickerSubject('');
+        setTopicPickerUnit('');
+        setTopicPickerTopic('');
         setCustomTopicName('');
         setCustomTopicSubject('');
         setCustomTopicDuration('1');
@@ -707,7 +1194,7 @@ const Dashboard = () => {
         addTopicToToday({
             subject: _cleanTopicName(customTopicSubject) || 'Custom Topic',
             subjectCode: '',
-            unit: 'Self added',
+            unit: 'Custom Topic',
             topic,
             difficulty: 3,
             estimatedHours: Math.max(0.5, Number(customTopicDuration) || 1),
@@ -738,12 +1225,12 @@ const Dashboard = () => {
                 const freeSlot = fallbackSlots.find((s) => !usedSlots.has(s)) || fallbackSlots[0] || '12:00 PM';
                 usedSlots.add(freeSlot);
 
-                const moved = { ...next[idx], date: selectedDate, time: freeSlot, user_override: true };
+                const moved = { ...next[idx], date: selectedDate, time: freeSlot, user_override: false, moved_by_user: true };
                 next[idx] = moved;
                 _saveStatus(moved, moved.status || 'pending');
             }
 
-            next = next.filter((t) => !hiddenSubjects.includes(t.subject || ''));
+            next = next.filter((t) => !_isTaskHidden(t, hiddenSubjects));
             try { localStorage.setItem('generatedSchedule', JSON.stringify(next)); } catch (_) {}
             return next;
         });
@@ -778,7 +1265,8 @@ const Dashboard = () => {
         }
     };
 
-    const openTopicPicker = async () => {
+    const openTopicPicker = async (mode = 'syllabus') => {
+        setTopicPickerMode(mode);
         setTopicPicker(true);
         // Load backend hierarchy if not yet loaded
         if (subjectHierarchy.length === 0) {
@@ -855,23 +1343,37 @@ const Dashboard = () => {
     }, [selectedDate, tasks]);
 
     // Limit tasks to fit within daily study hours, weighted by difficulty
-    const getTasksForDateWithinHours = (dateStr, maxHours) => {
-        const candidates = tasks.filter(
-            (task) => task.date === dateStr && !hiddenSubjects.includes(task.subject || ''),
-        );
-        let accum = 0;
-        const result = [];
-        for (const t of candidates) {
-            const hrs = Math.max(0.5, Math.min(2.5, Number(t.estimated_hours) || 1));
-            if (accum + hrs <= maxHours) {
-                result.push(t);
-                accum += hrs;
-            } else if (result.length === 0) {
-                result.push(t);
-                break;
-            }
+    const getTasksForDateWithinHours = (dateStr) => {
+        const budgetMinutes = Math.max(30, Math.round(studyHoursPerDay * 60));
+        let usedMinutes = 0;
+        const picked = [];
+
+        for (const task of tasks
+            .filter((task) => task.date === dateStr && !_isTaskHidden(task, hiddenSubjects))
+            .sort((a, b) => {
+                const aUnitIndex = Number.isFinite(Number(a.unit_number)) ? Number(a.unit_number) : Number(a.unit_index ?? 0);
+                const bUnitIndex = Number.isFinite(Number(b.unit_number)) ? Number(b.unit_number) : Number(b.unit_index ?? 0);
+                if (aUnitIndex !== bUnitIndex) return aUnitIndex - bUnitIndex;
+                const aTopicIndex = Number.isFinite(Number(a.topic_index)) ? Number(a.topic_index) : 0;
+                const bTopicIndex = Number.isFinite(Number(b.topic_index)) ? Number(b.topic_index) : 0;
+                if (aTopicIndex !== bTopicIndex) return aTopicIndex - bTopicIndex;
+                const aTime = String(a.time || '');
+                const bTime = String(b.time || '');
+                if (aTime !== bTime) return aTime.localeCompare(bTime);
+                const aSubject = String(a.subject || '');
+                const bSubject = String(b.subject || '');
+                if (aSubject !== bSubject) return aSubject.localeCompare(bSubject);
+                return String(a.topic || '').localeCompare(String(b.topic || ''));
+            })) {
+            const taskMinutes = Math.max(30, parseDurationToMinutes(task.duration) || Math.round(Number(task.estimated_hours || 1) * 60));
+            if (picked.length > 0 && usedMinutes + taskMinutes > budgetMinutes) continue;
+
+            usedMinutes += taskMinutes;
+            picked.push(task);
+            if (usedMinutes >= budgetMinutes) break;
         }
-        return result;
+
+        return picked;
     };
     const studyHoursPerDay = (() => {
         try {
@@ -904,6 +1406,26 @@ const Dashboard = () => {
     ].sort((a, b) => a.localeCompare(b));
 
     const todayDateObj = new Date(todayIso);
+    const deadlineByDate = {};
+    deadlineItems.forEach((item) => {
+        const key = String(item.due_date || '').slice(0, 10);
+        if (!key) return;
+        if (!deadlineByDate[key]) deadlineByDate[key] = [];
+        deadlineByDate[key].push(item);
+    });
+    const deadlineSummary = deadlineItems.reduce((acc, item) => {
+        const status = String(item.status || 'upcoming').toLowerCase();
+        if (status === 'overdue') acc.overdue += 1;
+        else if (status === 'due') acc.due += 1;
+        else if (status !== 'done') acc.upcoming += 1;
+        return acc;
+    }, { overdue: 0, due: 0, upcoming: 0 });
+
+    const refreshDeadlines = async () => {
+        const token = getAuthToken();
+        const res = await agentAPI.getDeadlines({}, token);
+        setDeadlineItems(_normalizeDeadlineItems(res?.deadlines || []));
+    };
 
     // Build intensity map per date (how "green" a box should be) for the current month
     const dateIntensityMap = {};
@@ -1041,78 +1563,23 @@ const Dashboard = () => {
                                     )}
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <select
-                                            value={preferredTopicDraft}
-                                            onChange={(e) => setPreferredTopicDraft(e.target.value)}
-                                            className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white min-w-[220px]"
-                                            title="Select subjects or topics to prioritize in your schedule"
-                                        >
-                                            <option value="">Select subject or topic</option>
-                                            {preferredTopicOptions.map((option) => (
-                                                <option key={option.value} value={option.value}>{option.label}</option>
-                                            ))}
-                                        </select>
-                                        <button
-                                            onClick={() => {
-                                                if (!preferredTopicDraft || preferredTopics.includes(preferredTopicDraft)) return;
-                                                setPreferredTopics((prev) => [...prev, preferredTopicDraft]);
-                                                setPreferredTopicDraft('');
-                                            }}
-                                            disabled={!preferredTopicDraft || preferredTopics.includes(preferredTopicDraft)}
-                                            className="px-3 py-2 text-sm border border-primary-200 text-primary-700 rounded-lg hover:bg-primary-50 disabled:opacity-50 font-medium"
-                                        >
-                                            Add
-                                        </button>
-                                        <div className="flex items-center gap-2">
-                                            <select
-                                                value={hiddenSubjects.length > 0 ? 'configured' : ''}
-                                                onChange={(e) => {
-                                                    if (e.target.value === 'configure') {
-                                                        const available = hiddenSubjectOptions.filter(s => !hiddenSubjects.includes(s));
-                                                        const hidden = hiddenSubjectOptions.filter(s => hiddenSubjects.includes(s));
-                                                        const input = prompt(
-                                                            hidden.length > 0 
-                                                                ? `Currently hidden: ${hidden.join(', ')}\n\nAvailable to hide: ${available.join(', ')}\n\nEnter subject names to hide (comma-separated):`
-                                                                : `Available subjects: ${hiddenSubjectOptions.join(', ')}\n\nEnter subject names to hide (comma-separated):`,
-                                                            hiddenSubjects.join(', ')
-                                                        );
-                                                        if (input !== null) {
-                                                            setHiddenSubjects(input.split(',').map(s => s.trim()).filter(Boolean));
-                                                        }
-                                                    }
-                                                }}
-                                                className="text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white flex-1"
-                                                title="Manage hidden subjects"
-                                            >
-                                                <option value="">
-                                                    {hiddenSubjects.length === 0 
-                                                        ? 'Show all subjects' 
-                                                        : hiddenSubjects.length === 1
-                                                        ? `Hide: ${hiddenSubjects[0]}`
-                                                        : `Hide ${hiddenSubjects.length} subjects`}
-                                                </option>
-                                                <option value="configure">→ Change</option>
-                                            </select>
-                                        </div>
-                                        <button
-                                            onClick={rebuildMixedScheduleNow}
-                                            disabled={rebuildingSchedule}
-                                            className="px-2.5 py-1.5 text-sm border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 inline-flex items-center gap-1"
-                                            title="Refresh schedule from extracted topics"
-                                        >
-                                            <RefreshCw className={`w-3.5 h-3.5 ${rebuildingSchedule ? 'animate-spin' : ''}`} />
-                                            Refresh
-                                        </button>
-                                    </div>
                                     {selectedDate === todayIso && (
-                                        <button
-                                            onClick={openTopicPicker}
-                                            className="flex items-center gap-1 px-3 py-1.5 bg-primary-50 text-primary-700 border border-primary-200 rounded-lg text-sm hover:bg-primary-100 transition-colors"
-                                            title="Add a topic you want to study today"
-                                        >
-                                            <span className="font-bold text-base leading-none">+</span> Add Topic
-                                        </button>
+                                        <>
+                                            <button
+                                                onClick={() => openTopicPicker('syllabus')}
+                                                className="inline-flex items-center gap-1.5 px-3 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 transition-colors shadow-sm"
+                                                title="Add a topic you want to study today"
+                                            >
+                                                <span className="font-bold text-base leading-none">+</span> Add Topic
+                                            </button>
+                                            <button
+                                                onClick={() => openTopicPicker('hide')}
+                                                className="inline-flex items-center gap-1.5 px-3 py-2 bg-white text-amber-700 border border-amber-200 rounded-lg text-sm font-medium hover:bg-amber-50 transition-colors shadow-sm"
+                                                title="Hide a subject, unit, or topic you do not want to see right now"
+                                            >
+                                                Hide Topic
+                                            </button>
+                                        </>
                                     )}
                                     <Calendar className="w-6 h-6 text-primary-600" />
                                 </div>
@@ -1190,7 +1657,7 @@ const Dashboard = () => {
                                                         <span className="text-xs text-gray-400">{task.unit}</span>
                                                     </>
                                                 )}
-                                                {task.user_override && (
+                                                {task.user_override && task.custom_added && (
                                                     <span className="text-xs px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 border border-amber-100 ml-auto">My pick</span>
                                                 )}
                                             </div>
@@ -1222,10 +1689,13 @@ const Dashboard = () => {
                                                 </div>
                                             )}
 
-                                            {topicResources[task.topic]?.length > 0 && (
+                                            {(topicResources[task.topic]?.length > 0 || task.topic) && (
                                                 <div className="flex flex-wrap gap-1.5 mb-3">
                                                     {(() => {
-                                                        const { web, video } = _pickResourceLinks(topicResources[task.topic]);
+                                                        const resourcesForTopic = topicResources[task.topic]?.length > 0
+                                                            ? topicResources[task.topic]
+                                                            : _buildFallbackResourceLinks(task.topic, task.subject);
+                                                        const { web, video } = _pickResourceLinks(resourcesForTopic);
                                                         return (
                                                             <>
                                                                 {web && (
@@ -1386,6 +1856,10 @@ const Dashboard = () => {
                                         const info = dateIntensityMap[cell.date] || { level: -1 };
                                         const dayNumber = new Date(cell.date).getDate();
                                         const isSelected = cell.date === selectedDate;
+                                        const deadlinesForDay = deadlineByDate[cell.date] || [];
+                                        const hasOverdue = deadlinesForDay.some((item) => item.status === 'overdue');
+                                        const hasDue = deadlinesForDay.some((item) => item.status === 'due');
+                                        const hasUpcoming = deadlinesForDay.some((item) => item.status === 'upcoming');
                                         const baseIntensityClass = cell.inCurrentMonth
                                             ? getIntensityClass(info.level)
                                             : 'bg-gray-100 text-gray-400';
@@ -1406,13 +1880,21 @@ const Dashboard = () => {
                                                         );
                                                     }
                                                 }}
-                                                className={`h-8 w-8 rounded-md flex items-center justify-center text-[11px] font-medium transition-colors border ${
+                                                className={`h-8 w-8 rounded-md flex items-center justify-center text-[11px] font-medium transition-colors border relative ${
                                                     isSelected
                                                         ? 'border-primary-600 ring-1 ring-primary-400'
                                                         : 'border-transparent'
                                                 } ${baseIntensityClass}`}
                                             >
                                                 {dayNumber}
+                                                {deadlinesForDay.length > 0 && (
+                                                    <span
+                                                        className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full ${
+                                                            hasOverdue ? 'bg-red-500' : hasDue ? 'bg-amber-500' : hasUpcoming ? 'bg-blue-500' : 'bg-gray-400'
+                                                        }`}
+                                                        title={`${deadlinesForDay.length} deadline${deadlinesForDay.length === 1 ? '' : 's'}`}
+                                                    />
+                                                )}
                                             </button>
                                         );
                                     })}
@@ -1421,6 +1903,146 @@ const Dashboard = () => {
                             <p className="mt-3 text-xs text-gray-500">
                                 Darker green means a heavier study day. Click a date to see that day's plan.
                             </p>
+                            <div className="mt-2 flex items-center gap-3 text-[11px] text-gray-500">
+                                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> Overdue</span>
+                                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" /> Due today</span>
+                                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500" /> Upcoming</span>
+                            </div>
+                            <div className="mt-4 border-t border-gray-100 pt-4">
+                                <div className="flex items-center justify-between mb-2">
+                                    <h3 className="text-sm font-semibold text-gray-800">Upcoming deadlines</h3>
+                                </div>
+                                <div className="space-y-2 max-h-44 overflow-auto pr-1">
+                                    {(deadlineItems || [])
+                                        .filter((item) => String(item.status || '').toLowerCase() !== 'done')
+                                        .slice(0, 5)
+                                        .map((item) => (
+                                            <div key={item.id} className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+                                                <div className="flex items-start justify-between gap-2">
+                                                    <div>
+                                                        <p className="text-xs font-medium text-gray-800 line-clamp-2">{item.title || 'Deadline'}</p>
+                                                        <p className="text-[11px] text-gray-500 mt-0.5">
+                                                            {item.subject || 'General'}{item.due_date ? ` · ${new Date(item.due_date).toLocaleDateString()}` : ''}
+                                                        </p>
+                                                    </div>
+                                                    <span className={`text-[10px] px-2 py-0.5 rounded-full ${item.status === 'overdue' ? 'bg-red-100 text-red-700' : item.status === 'due' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
+                                                        {item.status || 'upcoming'}
+                                                    </span>
+                                                </div>
+                                                <div className="mt-2 flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={async () => {
+                                                            try {
+                                                                const token = getAuthToken();
+                                                                await agentAPI.markDeadlineDone(item.id, token);
+                                                                await refreshDeadlines();
+                                                            } catch (_) {}
+                                                        }}
+                                                        className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100"
+                                                    >
+                                                        <CheckCircle className="h-3.5 w-3.5" />
+                                                        Done
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={async () => {
+                                                            try {
+                                                                const token = getAuthToken();
+                                                                await agentAPI.deleteDeadline(item.id, token);
+                                                                await refreshDeadlines();
+                                                            } catch (_) {}
+                                                        }}
+                                                        className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100"
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                        Delete
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    {(!deadlineItems || deadlineItems.filter((item) => String(item.status || '').toLowerCase() !== 'done').length === 0) && (
+                                        <p className="text-xs text-gray-400">No extracted deadlines yet.</p>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="card p-4 w-full">
+                            <h3 className="text-sm font-semibold text-gray-800 mb-2">Paste Deadline Text</h3>
+                            <p className="text-xs text-gray-500 mb-3">Paste a class message, announcement, or note to extract dated deadlines.</p>
+                            <div className="space-y-3">
+                                <input
+                                    value={deadlineTextSubject}
+                                    onChange={(e) => setDeadlineTextSubject(e.target.value)}
+                                    className="input-field text-sm"
+                                    placeholder="Optional subject label"
+                                />
+                                <textarea
+                                    value={deadlineText}
+                                    onChange={(e) => setDeadlineText(e.target.value)}
+                                    className="w-full min-h-32 rounded-lg border border-gray-300 px-3 py-2 text-sm resize-y"
+                                    placeholder="Paste deadline text here. Example: Assignment 2 due on 28 April 2026, quiz on 2 May 2026."
+                                />
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        const text = deadlineText.trim();
+                                        if (!text) return;
+                                        setDeadlineTextLoading(true);
+                                        try {
+                                            const token = localStorage.getItem('authToken');
+                                            const response = await agentAPI.extractDeadlinesFromText({ subject: deadlineTextSubject.trim(), text }, token);
+
+                                            const loadDeadlines = async () => {
+                                                const refreshed = await agentAPI.getDeadlines({}, token);
+                                                setDeadlineItems(_normalizeDeadlineItems(refreshed?.deadlines || []));
+                                                return refreshed?.deadlines || [];
+                                            };
+
+                                            if (response?.processing) {
+                                                let attempts = 0;
+                                                let deadlines = [];
+                                                while (attempts < 8 && deadlines.length === 0) {
+                                                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                                                    deadlines = await loadDeadlines();
+                                                    attempts += 1;
+                                                }
+                                            } else {
+                                                await loadDeadlines();
+                                            }
+
+                                            setDeadlineText('');
+                                            setDeadlineTextSubject('');
+                                        } catch (_) {
+                                            setAdaptiveMsg('Could not extract deadlines from pasted text.');
+                                            setTimeout(() => setAdaptiveMsg(null), 4000);
+                                        } finally {
+                                            setDeadlineTextLoading(false);
+                                        }
+                                    }}
+                                    disabled={!deadlineText.trim() || deadlineTextLoading}
+                                    className="w-full px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 disabled:opacity-50"
+                                >
+                                    {deadlineTextLoading ? 'Extracting...' : 'Extract Deadlines'}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="card p-4 w-full">
+                            <h3 className="text-sm font-semibold text-gray-800 mb-3">Deadline Summary</h3>
+                            <div className="grid grid-cols-3 gap-2 text-center">
+                                {[
+                                    { label: 'Overdue', value: deadlineSummary.overdue, tone: 'bg-red-50 text-red-700 border-red-100' },
+                                    { label: 'Due Now', value: deadlineSummary.due, tone: 'bg-amber-50 text-amber-700 border-amber-100' },
+                                    { label: 'Upcoming', value: deadlineSummary.upcoming, tone: 'bg-blue-50 text-blue-700 border-blue-100' },
+                                ].map((item) => (
+                                    <div key={item.label} className={`rounded-lg border px-2 py-2 ${item.tone}`}>
+                                        <div className="text-lg font-bold">{item.value}</div>
+                                        <div className="text-[11px]">{item.label}</div>
+                                    </div>
+                                ))}
+                            </div>
                         </div>
 
                         <motion.div
@@ -1676,187 +2298,226 @@ const Dashboard = () => {
                 const units = topicPickerSubject ? getUnits(topicPickerSubject) : [];
                 const topicsForUnit = topicPickerSubject && topicPickerUnit
                     ? getTopics(topicPickerSubject, topicPickerUnit) : [];
+                const selectedTopicMeta = topicsForUnit.find((item) => item.name === topicPickerTopic) || null;
                 const DIFF_LABELS = ['', 'Easy', 'Basic', 'Intermediate', 'Hard', 'Advanced'];
 
                 return (
-                    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center">
-                        <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
+                    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center px-4">
+                        <div className="bg-white rounded-xl shadow-xl p-5 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
                             <div className="flex items-center justify-between mb-4">
-                                <h3 className="text-lg font-bold text-gray-800">Add Topic to Today</h3>
+                                <h3 className="text-lg font-bold text-gray-800">
+                                    {topicPickerMode === 'hide' ? 'Hide Topic' : 'Add Topic to Today'}
+                                </h3>
                                 <button
-                                    onClick={() => { setTopicPicker(false); setTopicPickerSubject(''); setTopicPickerUnit(''); }}
+                                    onClick={() => { setTopicPicker(false); setTopicPickerMode('syllabus'); setTopicPickerSubject(''); setTopicPickerUnit(''); setTopicPickerTopic(''); setCustomTopicName(''); setCustomTopicSubject(''); setCustomTopicDuration('1'); }}
                                     className="text-gray-400 hover:text-gray-600 text-xl leading-none"
                                 >×</button>
                             </div>
-                            <p className="text-sm text-gray-500 mb-5">
-                                Pick a syllabus topic or add any custom topic you want to study today.
-                                Web Search and YouTube links will be attached automatically.
+                            <p className="text-sm text-gray-500 mb-4">
+                                Choose a syllabus topic with subject, unit, and topic dropdowns, or add a custom topic in the separate section below.
                             </p>
 
-                            {preferredTopics.length > 0 && (
-                                <div className="flex flex-wrap gap-2 mb-4">
-                                    {preferredTopics.map((topic) => (
-                                        <button
-                                            key={topic}
-                                            onClick={() => setPreferredTopics((prev) => prev.filter((item) => item !== topic))}
-                                            className="text-xs px-2 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100"
-                                            title="Remove preferred topic"
-                                        >
-                                            {topic} ×
-                                        </button>
-                                    ))}
-                                </div>
-                            )}
-
-                            {/* Subject picker */}
-                            <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Subject</label>
-                            <div className="flex flex-wrap gap-2 mb-4">
-                                {subjects.length === 0 && (
-                                    <p className="text-sm text-gray-400 italic">
-                                        No subjects found. Upload a syllabus first.
-                                    </p>
-                                )}
-                                {subjects.map((s) => {
-                                    const code = getSubjectCode(s);
-                                    return (
-                                        <button
-                                            key={s}
-                                            onClick={() => { setTopicPickerSubject(s); setTopicPickerUnit(''); }}
-                                            className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors ${
-                                                topicPickerSubject === s
-                                                    ? 'bg-primary-600 text-white border-primary-600'
-                                                    : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
-                                            }`}
-                                        >
-                                            {s}
-                                            {code && <span className="ml-1 font-mono text-xs opacity-70">({code})</span>}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-
-                            {/* Unit picker */}
-                            {topicPickerSubject && (
-                                <>
-                                    <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Unit / Module</label>
-                                    <div className="flex flex-wrap gap-2 mb-4">
-                                        {units.map((u) => (
-                                            <button
-                                                key={u}
-                                                onClick={() => setTopicPickerUnit(u)}
-                                                className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-colors ${
-                                                    topicPickerUnit === u
-                                                        ? 'bg-indigo-600 text-white border-indigo-600'
-                                                        : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
-                                                }`}
-                                            >
-                                                {u}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </>
-                            )}
-
-                            {/* Topic picker */}
-                            {topicPickerUnit && (
-                                <>
-                                    <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Topic</label>
-                                    <div className="max-h-48 overflow-y-auto space-y-1 mb-4 pr-1">
-                                        {topicsForUnit.map(({ name: topic, difficulty, est_hours }) => {
-                                            const alreadyToday = tasks.some(
-                                                (t) => t.date === todayIso && t.topic === topic && t.status !== 'later'
-                                            );
-                                            return (
-                                                <button
-                                                    key={topic}
-                                                    disabled={alreadyToday}
-                                                    onClick={() =>
-                                                        addTopicToToday({
-                                                            subject: topicPickerSubject,
-                                                            subjectCode: getSubjectCode(topicPickerSubject),
-                                                            unit: topicPickerUnit,
-                                                            topic,
-                                                            difficulty,
-                                                            estimatedHours: est_hours,
-                                                        })
-                                                    }
-                                                    className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
-                                                        alreadyToday
-                                                            ? 'bg-gray-50 text-gray-400 border-gray-100 cursor-not-allowed'
-                                                            : 'bg-white text-gray-700 border-gray-200 hover:bg-primary-50 hover:border-primary-200 hover:text-primary-700'
-                                                    }`}
-                                                >
-                                                    <span className="font-medium">{topic}</span>
-                                                    <span className={`ml-2 text-xs px-1.5 py-0.5 rounded-full ${
-                                                        difficulty >= 4 ? 'bg-orange-100 text-orange-700' :
-                                                        difficulty >= 3 ? 'bg-yellow-100 text-yellow-700' :
-                                                        'bg-green-100 text-green-700'
-                                                    }`}>{DIFF_LABELS[difficulty] || 'Intermediate'}</span>
-                                                    <span className="ml-1 text-xs text-gray-400">{est_hours < 1 ? `${Math.round(est_hours*60)}min` : `${est_hours}h`}</span>
-                                                    {alreadyToday && <span className="ml-2 text-xs text-gray-400">(already today)</span>}
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                </>
-                            )}
-
-                            <div className="border-t border-gray-100 pt-4 mt-4 space-y-3">
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Custom Topic</label>
-                                    <input
-                                        type="text"
-                                        value={customTopicName}
-                                        onChange={(e) => setCustomTopicName(e.target.value)}
-                                        placeholder="Example: Backpropagation intuition"
-                                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Subject Label</label>
-                                    <input
-                                        type="text"
-                                        value={customTopicSubject}
-                                        onChange={(e) => setCustomTopicSubject(e.target.value)}
-                                        placeholder="Optional subject name"
-                                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Planned Time</label>
-                                    <select
-                                        value={customTopicDuration}
-                                        onChange={(e) => setCustomTopicDuration(e.target.value)}
-                                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                                    >
-                                        <option value="0.5">30 minutes</option>
-                                        <option value="1">1 hour</option>
-                                        <option value="1.5">1.5 hours</option>
-                                        <option value="2">2 hours</option>
-                                    </select>
-                                </div>
+                            <div className="flex gap-2 mb-4 p-1 bg-gray-100 rounded-lg">
                                 <button
-                                    onClick={addCustomTopicToToday}
-                                    disabled={!_cleanTopicName(customTopicName) || customTopicLoading}
-                                    className="w-full px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 disabled:opacity-50"
+                                    type="button"
+                                    onClick={() => setTopicPickerMode('syllabus')}
+                                    className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                                        topicPickerMode === 'syllabus'
+                                            ? 'bg-white text-primary-700 shadow-sm'
+                                            : 'text-gray-600 hover:text-gray-800'
+                                    }`}
                                 >
-                                    {customTopicLoading ? 'Adding resources...' : 'Add Custom Topic'}
+                                    Syllabus Topic
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setTopicPickerMode('custom')}
+                                    className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                                        topicPickerMode === 'custom'
+                                            ? 'bg-white text-primary-700 shadow-sm'
+                                            : 'text-gray-600 hover:text-gray-800'
+                                    }`}
+                                >
+                                    Custom Topic
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setTopicPickerMode('hide')}
+                                    className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                                        topicPickerMode === 'hide'
+                                            ? 'bg-white text-amber-700 shadow-sm'
+                                            : 'text-gray-600 hover:text-gray-800'
+                                    }`}
+                                >
+                                    Hide Topic
                                 </button>
                             </div>
 
-                            <button
-                                onClick={() => {
-                                    setTopicPicker(false);
-                                    setTopicPickerSubject('');
-                                    setTopicPickerUnit('');
-                                    setCustomTopicName('');
-                                    setCustomTopicSubject('');
-                                    setCustomTopicDuration('1');
-                                }}
-                                className="w-full px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 transition-colors"
-                            >
-                                Cancel
-                            </button>
+                            {(topicPickerMode === 'syllabus' || topicPickerMode === 'hide') && (
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Subject</label>
+                                        <select
+                                            value={topicPickerSubject}
+                                            onChange={(e) => {
+                                                setTopicPickerSubject(e.target.value);
+                                                setTopicPickerUnit('');
+                                                setTopicPickerTopic('');
+                                            }}
+                                            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white"
+                                        >
+                                            <option value="">Select subject</option>
+                                            {subjects.length === 0 && <option value="" disabled>No subjects found yet</option>}
+                                            {subjects.map((s) => {
+                                                const code = getSubjectCode(s);
+                                                return (
+                                                    <option key={s} value={s}>
+                                                        {s}{code ? ` (${code})` : ''}
+                                                    </option>
+                                                );
+                                            })}
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Unit</label>
+                                        <select
+                                            value={topicPickerUnit}
+                                            onChange={(e) => {
+                                                setTopicPickerUnit(e.target.value);
+                                                setTopicPickerTopic('');
+                                            }}
+                                            disabled={!topicPickerSubject}
+                                            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white disabled:bg-gray-50 disabled:text-gray-400"
+                                        >
+                                            <option value="">Select unit</option>
+                                            {units.map((unit) => (
+                                                <option key={unit} value={unit}>{unit}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Topic</label>
+                                        <select
+                                            value={topicPickerTopic}
+                                            onChange={(e) => setTopicPickerTopic(e.target.value)}
+                                            disabled={!topicPickerUnit}
+                                            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white disabled:bg-gray-50 disabled:text-gray-400"
+                                        >
+                                            <option value="">Select topic</option>
+                                            {topicsForUnit.map(({ name: topic }) => (
+                                                <option key={topic} value={topic}>{topic}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    {selectedTopicMeta && (
+                                        <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                                            <span className="font-medium text-gray-700">{selectedTopicMeta.name}</span>
+                                            <span className="text-gray-400">·</span>
+                                            <span>{selectedTopicMeta.est_hours < 1 ? `${Math.round(selectedTopicMeta.est_hours * 60)} min` : `${selectedTopicMeta.est_hours} h`}</span>
+                                            <span className="text-gray-400">·</span>
+                                            <span>{DIFF_LABELS[selectedTopicMeta.difficulty] || 'Intermediate'}</span>
+                                        </div>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (!topicPickerSubject) return;
+                                            if (topicPickerMode === 'hide') {
+                                                hideSelection();
+                                                return;
+                                            }
+                                            if (!topicPickerUnit || !topicPickerTopic) return;
+                                            addTopicToToday({
+                                                subject: topicPickerSubject,
+                                                subjectCode: getSubjectCode(topicPickerSubject),
+                                                unit: topicPickerUnit,
+                                                topic: topicPickerTopic,
+                                                difficulty: selectedTopicMeta?.difficulty || 3,
+                                                estimatedHours: selectedTopicMeta?.est_hours || 1,
+                                            });
+                                        }}
+                                        disabled={
+                                            !topicPickerSubject ||
+                                            (topicPickerMode !== 'hide' && (!topicPickerUnit || !topicPickerTopic))
+                                        }
+                                        className={`w-full px-4 py-2.5 rounded-lg text-sm font-medium disabled:opacity-50 ${
+                                            topicPickerMode === 'hide'
+                                                ? 'bg-amber-600 text-white hover:bg-amber-700'
+                                                : 'bg-primary-600 text-white hover:bg-primary-700'
+                                        }`}
+                                    >
+                                        {topicPickerMode === 'hide' ? 'Hide Selected' : 'Add Topic'}
+                                    </button>
+                                </div>
+                            )}
+
+                            {topicPickerMode === 'custom' && (
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Custom Topic</label>
+                                        <input
+                                            type="text"
+                                            value={customTopicName}
+                                            onChange={(e) => setCustomTopicName(e.target.value)}
+                                            placeholder="Example: Backpropagation intuition"
+                                            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Subject Label</label>
+                                        <input
+                                            type="text"
+                                            value={customTopicSubject}
+                                            onChange={(e) => setCustomTopicSubject(e.target.value)}
+                                            placeholder="Optional subject name"
+                                            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">Planned Time</label>
+                                        <select
+                                            value={customTopicDuration}
+                                            onChange={(e) => setCustomTopicDuration(e.target.value)}
+                                            className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white"
+                                        >
+                                            <option value="0.5">30 minutes</option>
+                                            <option value="1">1 hour</option>
+                                            <option value="1.5">1.5 hours</option>
+                                            <option value="2">2 hours</option>
+                                        </select>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={addCustomTopicToToday}
+                                        disabled={!_cleanTopicName(customTopicName) || customTopicLoading}
+                                        className="w-full px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 disabled:opacity-50"
+                                    >
+                                        {customTopicLoading ? 'Adding resources...' : 'Add Custom Topic'}
+                                    </button>
+                                </div>
+                            )}
+
+                            <div className="mt-4 pt-4 border-t border-gray-100 flex justify-end">
+                                <button
+                                    onClick={() => {
+                                        setTopicPicker(false);
+                                        setTopicPickerMode('syllabus');
+                                        setTopicPickerSubject('');
+                                        setTopicPickerUnit('');
+                                        setTopicPickerTopic('');
+                                        setCustomTopicName('');
+                                        setCustomTopicSubject('');
+                                        setCustomTopicDuration('1');
+                                    }}
+                                    className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+                                >
+                                    Close
+                                </button>
+                            </div>
                         </div>
                     </div>
                 );

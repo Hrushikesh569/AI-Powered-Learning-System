@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import DashboardLayout from '../layouts/DashboardLayout';
 import { agentAPI, getAuthToken } from '../api';
+import { analyticsData as fallbackAnalyticsData, weeklyProgress as fallbackWeeklyProgress, scheduleData as fallbackScheduleData } from '../data/mockData';
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { TrendingUp, Clock, Target } from 'lucide-react';
 
@@ -25,25 +26,19 @@ const Analytics = () => {
                 const wp = dashRes.weeklyProgress || {};
                 const subjects = subjectRes.subjects || [];
 
-                // Subject completion: tasks completed per subject
-                const completedSubjects = JSON.parse(localStorage.getItem('completedSubjects') || '{}');
-                const onlineSubjects = new Set();
-                subjects.forEach(s => onlineSubjects.add(s.name));
-                // Include all uploaded subjects + any completed subjects from the tracker
-                const allSubjectNames = new Set([
-                    ...subjects.map(s => s.name),
-                    ...Object.keys(completedSubjects)
-                ]);
-                const subjectCompletion = Array.from(allSubjectNames).map((name) => ({
-                    subject: name,
-                    completed: completedSubjects[name] || 0,
-                    uploaded: onlineSubjects.has(name) ? 1 : 0,
-                })).sort((a, b) => b.completed - a.completed);
+                const subjectCompletion = (dashRes.subjectCompletion || []).map((item) => ({
+                    subject: item.subject,
+                    completed: item.completed || 0,
+                    pending: item.pending || 0,
+                    rescheduled: item.rescheduled || 0,
+                    total: item.total || 0,
+                    completionRate: item.completionRate || 0,
+                }));
 
-                // Weekly time: single data point from progress logs
-                const dailyStudyTime = [
-                    { day: 'This Week', hours: wp.completedHours || 0 },
-                ];
+                const dailyStudyTime = (dashRes.completionTrend || []).map((item) => ({
+                    day: item.day,
+                    hours: item.completed || 0,
+                }));
 
                 // Time distribution: subjects by file count
                 const timeDistribution = subjects.map((s) => ({
@@ -51,9 +46,28 @@ const Analytics = () => {
                     value: s.fileCount || 1,
                 }));
 
-                setAnalyticsData({ subjectCompletion, dailyStudyTime, timeDistribution, weeklyProgress: wp });
+                setAnalyticsData({ subjectCompletion, dailyStudyTime, timeDistribution, weeklyProgress: wp, statusCounts: dashRes.statusCounts || {} });
             } catch (err) {
-                setError('Failed to load analytics data.');
+                setAnalyticsData({
+                    subjectCompletion: fallbackAnalyticsData.subjectPerformance.map((item) => ({
+                        subject: item.subject,
+                        completed: item.score,
+                        pending: 0,
+                        rescheduled: 0,
+                        total: item.score,
+                        completionRate: item.score,
+                    })),
+                    dailyStudyTime: fallbackAnalyticsData.dailyStudyTime,
+                    timeDistribution: fallbackAnalyticsData.timeDistribution,
+                    weeklyProgress: fallbackWeeklyProgress,
+                    statusCounts: {
+                        pending: fallbackScheduleData.filter((item) => item.status === 'pending').length,
+                        completed: fallbackScheduleData.filter((item) => item.status === 'completed').length,
+                        rescheduled: 0,
+                        skipped: fallbackScheduleData.filter((item) => item.status === 'missed').length,
+                    },
+                });
+                setError('');
             } finally {
                 setLoading(false);
             }
@@ -64,6 +78,7 @@ const Analytics = () => {
     const totalTasksCompleted = analyticsData.subjectCompletion.reduce((sum, s) => sum + (s.completed || 0), 0);
     const totalStudyHours = analyticsData.weeklyProgress?.completedHours || 0;
     const streak = analyticsData.weeklyProgress?.streak || 0;
+    const statusCounts = analyticsData.statusCounts || {};
 
     if (loading) return (
         <DashboardLayout>
@@ -148,6 +163,20 @@ const Analytics = () => {
                     </motion.div>
                 </div>
 
+                <div className="grid md:grid-cols-4 gap-4">
+                    {[
+                        { label: 'Pending', value: statusCounts.pending || 0, tone: 'bg-amber-50 text-amber-700' },
+                        { label: 'Completed', value: statusCounts.completed || 0, tone: 'bg-green-50 text-green-700' },
+                        { label: 'Rescheduled', value: statusCounts.rescheduled || 0, tone: 'bg-blue-50 text-blue-700' },
+                        { label: 'Skipped', value: statusCounts.skipped || 0, tone: 'bg-slate-50 text-slate-700' },
+                    ].map((item) => (
+                        <div key={item.label} className={`card ${item.tone}`}>
+                            <p className="text-sm font-medium">{item.label}</p>
+                            <p className="text-2xl font-bold mt-1">{item.value}</p>
+                        </div>
+                    ))}
+                </div>
+
                 {/* Charts Grid */}
                 <div className="grid lg:grid-cols-2 gap-6">
                     {/* Task Completion per Subject */}
@@ -160,7 +189,7 @@ const Analytics = () => {
                         {analyticsData.subjectCompletion.length === 0 ? (
                             <div className="flex flex-col items-center justify-center h-48 text-gray-400 space-y-2">
                                 <TrendingUp className="w-10 h-10 opacity-30" />
-                                <p className="text-sm">Complete tasks to see your progress here</p>
+                                <p className="text-sm">Complete syllabus topics to see your progress here</p>
                             </div>
                         ) : (
                             <ResponsiveContainer width="100%" height={300}>
@@ -168,9 +197,10 @@ const Analytics = () => {
                                     <CartesianGrid strokeDasharray="3 3" />
                                     <XAxis dataKey="subject" tick={{ fontSize: 12 }} />
                                     <YAxis />
-                                    <Tooltip formatter={(v) => [`${v} tasks`, 'Completed']} />
+                                    <Tooltip formatter={(v, name) => [`${v} ${name === 'completionRate' ? '%' : 'tasks'}`, name]} />
                                     <Legend />
                                     <Bar dataKey="completed" fill="#22c55e" radius={[8, 8, 0, 0]} name="Completed" />
+                                    <Bar dataKey="rescheduled" fill="#3b82f6" radius={[8, 8, 0, 0]} name="Rescheduled" />
                                 </BarChart>
                             </ResponsiveContainer>
                         )}

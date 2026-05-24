@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Home, BarChart3, Users, User, LogOut, FileText, MessageCircle } from 'lucide-react';
+import { Home, BarChart3, Users, User, LogOut, FileText, MessageCircle, GraduationCap } from 'lucide-react';
 import StudyChat from './StudyChat';
 import { useState } from 'react';
 
@@ -12,6 +12,7 @@ const Sidebar = () => {
         { path: '/analytics', icon: BarChart3, label: 'Analytics' },
         { path: '/community', icon: Users, label: 'Community' },
         { path: '/syllabus', icon: FileText, label: 'Syllabus & Files' },
+        { path: '/study-tutor', icon: GraduationCap, label: 'Study Tutor' },
         { path: '/profile', icon: User, label: 'Profile' },
     ];
 
@@ -20,6 +21,9 @@ const Sidebar = () => {
     return (
         <div className="fixed left-0 top-0 h-screen w-64 bg-white shadow-lg z-50 flex flex-col">
             <div className="p-6 border-b">
+                <div className="inline-flex items-center rounded-full border border-primary-100 bg-primary-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-primary-700 mb-3">
+                    Beta
+                </div>
                 <h1 className="text-2xl font-bold text-primary-600">AI Scheduler</h1>
                 <p className="text-sm text-gray-500 mt-1">Your Study Mentor</p>
             </div>
@@ -50,7 +54,7 @@ const Sidebar = () => {
                     }`}
                 >
                     <MessageCircle className="w-5 h-5" />
-                    <span>Study Chat</span>
+                    <span>Quick PDF Q&A</span>
                 </button>
                 <Link
                     to="/"

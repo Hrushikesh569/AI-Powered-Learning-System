@@ -1,0 +1,74 @@
+{
+  "subject_name": "Data Mining",
+  "subject_code": "22PC1IT301",
+  "overview": "Course materials for Data Mining.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Introduction: Fundamentals of data mining",
+        "KDD process",
+        "Functionalities",
+        "Classification of Data Mining systems",
+        "Integration of a  Data mining system with a Database or a Data warehouse",
+        "Major issues in Data Mining. Data Preprocessing: Need for data preprocessing",
+        "Data Cleaning",
+        "Data Integration and Transformation",
+        "Data Reduction",
+        "Discretization and Concept Hierarchy Generation"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Data Warehouse and OLAP Technology for Data Mining: Multidimensional Data Model",
+        "Data Warehouse architecture",
+        "Data Warehouse implementation",
+        "From Data Warehousing to Data Mining. Data cube and OLAP Technology",
+        "Characterization and Discrimination: Attribute-Oriented Induction"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Mining Frequent",
+        "Associations and Correlations: Basic concepts",
+        "Frequent Itemset mining methods",
+        "Mining multilevel association rules from Transaction Databases",
+        "Mining Multidimensional association rules from Relational databases and Data Warehouses",
+        "From Association Mining to Correlation Analysis"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Classification and Prediction: Issues regarding Classification and Prediction",
+        "Classification by Decision Tree Induction",
+        "Bayesian Classification",
+        "KNN",
+        "Classification by Back propagation",
+        "Support Vector Machines",
+        "Prediction",
+        "Classifier Accuracy"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Cluster Analysis Introduction: Types of Data in Cluster Analysis",
+        "Major Clustering methods",
+        "Partitioning Methods",
+        "Density-Based methods. Outlier Detection & Analysis: Outlier Detection Methods-Statistical",
+        "Proximity-Based",
+        "Clustering-Based Classification Approaches",
+        "Mining Contextual and Collective Outliers",
+        "Outlier Detection in High Dimensional Data"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "subject_name": "Neural Networks and Deep Learning",
+  "subject_code": "22PC1AM303",
+  "overview": "Course materials for Neural Networks and Deep Learning.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Introduction: Biological Neuron",
+        "Idea of computational units",
+        "McCulloch–Pitts unit and Thresholding logic",
+        "Linear Perceptron",
+        "Perceptron Learning Algorithm",
+        "Linear separability",
+        "Convergence theorem for Perceptron Learning Algorithm",
+        "Type of network architecture",
+        "Activation functions",
+        "Basic Learning rules"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Neural Networks: Basics",
+        "Functions in Neural Networks",
+        "Feedforward Neural Networks: Multilayer Neural Networks",
+        "Gradient Descent learning",
+        "Backpropagation",
+        "Empirical Risk Minimization",
+        "Regularization",
+        "Radial Basis Neural Network. Feedback Neural Networks: Introduction",
+        "Analysis of Linear Auto associative FF Networks",
+        "Analysis of Pattern Storage Networks",
+        "Stochastic Networks",
+        "And Simulated Annealing",
+        "Boltzmann Machine"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Deep Learning: Introduction to Deep Learning",
+        "Need of Deep Learning",
+        "Constraints of Deep Learning",
+        "CNN operations",
+        "Architecture",
+        "Simple Convolution Network",
+        "Deep Convolutional Models",
+        "ResNet",
+        "AlexNet",
+        "InceptionNet",
+        "And others"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Improving Deep Neural Networks:  Data Augmentation",
+        "Under-fitting vs. over-fitting. Training Aspects of CNNs",
+        "Regularization",
+        "Weight Initialization",
+        "Activation Functions",
+        "Normalization",
+        "Hyperparameters in CNNs",
+        "Transfer Learning",
+        "And Fine Tuning in CNNS"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Recurrent Neural Networks: Bidirectional RNNs",
+        "Long-Term Dependencies",
+        "Echo State Networks",
+        "Long Short-Term Memory and Other Gated RNNs",
+        "Optimization for Long- Term Dependencies",
+        "Deep Generative Models: VAEs",
+        "GAN"
+      ]
+    }
+  ]
+}

@@ -1,26 +1,25 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Send, Loader2, BookOpen } from 'lucide-react';
-import { getAuthToken } from '../api';
+import { X, Send, Loader2, BookOpen, Sparkles } from 'lucide-react';
+import { agentAPI, getAuthToken } from '../api';
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
-const WELCOME = { role: 'bot', text: "Hi! I'm your AI study partner. Ask me anything about your uploaded study materials." };
+const WELCOME = { role: 'bot', text: "Hi! I'm the quick PDF Q&A panel. For a full study workspace, open Study Tutor." };
 
 export default function StudyChat({ open, onClose }) {
-    const [messages, setMessages]   = useState([WELCOME]);
-    const [input, setInput]         = useState('');
-    const [loading, setLoading]     = useState(false);
-    const bottomRef                 = useRef(null);
-    const abortRef                  = useRef(null);
+    const [messages, setMessages] = useState([WELCOME]);
+    const [input, setInput] = useState('');
+    const [loading, setLoading] = useState(false);
+    const bottomRef = useRef(null);
+
+    const quickPrompts = [
+        'Summarize the main idea of this file.',
+        'Explain the topic like I am a beginner.',
+        'Give me three likely exam questions.',
+    ];
 
     useEffect(() => {
         if (open) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, open]);
-
-    // Cancel any in-flight stream when the component unmounts or chat closes
-    useEffect(() => {
-        return () => abortRef.current?.abort();
-    }, []);
 
     const sendMessage = async (e) => {
         e?.preventDefault();
@@ -31,82 +30,25 @@ export default function StudyChat({ open, onClose }) {
         setInput('');
         setLoading(true);
 
-        // Append an empty bot bubble that we'll fill token-by-token
-        setMessages(prev => [...prev, { role: 'bot', text: '', streaming: true }]);
-
-        abortRef.current = new AbortController();
-
         try {
             const token = getAuthToken();
-            const res = await fetch(`${BASE_URL}/content/chat-stream`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                },
-                body: JSON.stringify({ question: q }),
-                signal: abortRef.current.signal,
-            });
+            const res = await agentAPI.chatWithBot({ question: q }, token);
+            const answer = res?.answer || 'I could not build a response right now.';
+            const suggestions = Array.isArray(res?.suggested_questions) ? res.suggested_questions : [];
+            const sources = Array.isArray(res?.sources) ? res.sources : [];
 
-            if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-
-                // SSE lines end with \n\n; process every complete event
-                const parts = buffer.split('\n\n');
-                buffer = parts.pop() ?? '';   // keep incomplete trailing chunk
-
-                for (const part of parts) {
-                    for (const line of part.split('\n')) {
-                        if (!line.startsWith('data: ')) continue;
-                        const raw = line.slice(6).trim();
-                        if (raw === '[DONE]') break;
-                        try {
-                            const { token: tok } = JSON.parse(raw);
-                            if (tok) {
-                                setMessages(prev => {
-                                    const updated = [...prev];
-                                    updated[updated.length - 1] = {
-                                        ...updated[updated.length - 1],
-                                        text: updated[updated.length - 1].text + tok,
-                                    };
-                                    return updated;
-                                });
-                            }
-                        } catch { /* malformed JSON — skip */ }
-                    }
-                }
-            }
+            setMessages(prev => [...prev, {
+                role: 'bot',
+                text: answer,
+                sources,
+                suggestions,
+            }]);
         } catch (err) {
-            if (err.name !== 'AbortError') {
-                setMessages(prev => {
-                    const updated = [...prev];
-                    updated[updated.length - 1] = {
-                        role: 'bot',
-                        text: "Sorry, I couldn't reach the server. Please try again.",
-                    };
-                    return updated;
-                });
-            }
+            setMessages(prev => [...prev, {
+                role: 'bot',
+                text: "Sorry, I couldn't reach the server. Please try again.",
+            }]);
         } finally {
-            setMessages(prev => {
-                const updated = [...prev];
-                // Mark streaming complete
-                if (updated[updated.length - 1]?.streaming) {
-                    updated[updated.length - 1] = {
-                        ...updated[updated.length - 1],
-                        streaming: false,
-                    };
-                }
-                return updated;
-            });
             setLoading(false);
         }
     };
@@ -129,8 +71,8 @@ export default function StudyChat({ open, onClose }) {
                             <div className="flex items-center space-x-2">
                                 <BookOpen className="w-5 h-5" />
                                 <div>
-                                    <p className="text-sm font-semibold leading-none">AI Study Partner</p>
-                                    <p className="text-xs text-primary-200 mt-0.5">Ask about your materials</p>
+                                    <p className="text-sm font-semibold leading-none">Quick PDF Q&A</p>
+                                    <p className="text-xs text-primary-200 mt-0.5">Fast answers for uploaded files</p>
                                 </div>
                             </div>
                             <button onClick={onClose}
@@ -143,24 +85,37 @@ export default function StudyChat({ open, onClose }) {
                         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
                             {messages.map((msg, idx) => (
                                 <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
+                                    <div className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
                                         msg.role === 'user'
                                             ? 'bg-primary-600 text-white rounded-br-sm'
                                             : 'bg-gray-100 text-gray-800 rounded-bl-sm'
                                     }`}>
-                                        {msg.text || (msg.streaming && (
+                                        {msg.text || (loading && msg.role === 'bot' && (
                                             <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
                                         ))}
-                                        {/* Blinking cursor while streaming */}
-                                        {msg.streaming && msg.text && (
-                                            <span className="inline-block w-0.5 h-3.5 bg-gray-500 animate-pulse ml-0.5 align-middle" />
-                                        )}
                                         {msg.sources && msg.sources.length > 0 && (
                                             <div className="mt-2 pt-2 border-t border-gray-200">
                                                 <p className="text-xs text-gray-500 font-medium mb-1">Sources:</p>
                                                 {msg.sources.slice(0, 3).map((s, i) => (
                                                     <p key={i} className="text-xs text-gray-500 truncate">• {s}</p>
                                                 ))}
+                                            </div>
+                                        )}
+                                        {msg.suggestions && msg.suggestions.length > 0 && (
+                                            <div className="mt-2 pt-2 border-t border-gray-200 space-y-1">
+                                                <p className="text-xs text-gray-500 font-medium flex items-center gap-1"><Sparkles className="w-3 h-3" /> Suggested questions</p>
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {msg.suggestions.slice(0, 3).map((question, index) => (
+                                                        <button
+                                                            key={index}
+                                                            type="button"
+                                                            onClick={() => setInput(question)}
+                                                            className="text-[11px] px-2 py-1 rounded-full bg-white border border-gray-200 text-gray-700 hover:border-primary-300 hover:text-primary-700 transition"
+                                                        >
+                                                            {question}
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -183,6 +138,18 @@ export default function StudyChat({ open, onClose }) {
                                 <Send className="w-4 h-4" />
                             </button>
                         </form>
+                        <div className="px-3 pb-3 flex flex-wrap gap-2 border-t border-gray-100 pt-3">
+                            {quickPrompts.map((prompt) => (
+                                <button
+                                    key={prompt}
+                                    type="button"
+                                    onClick={() => setInput(prompt)}
+                                    className="text-[11px] px-2.5 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100 hover:bg-primary-100 transition"
+                                >
+                                    {prompt}
+                                </button>
+                            ))}
+                        </div>
                     </motion.div>
                 )}
             </AnimatePresence>

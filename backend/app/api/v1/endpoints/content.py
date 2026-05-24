@@ -2,16 +2,19 @@
 import asyncio
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 from sqlalchemy import delete as sql_delete
 
 from app.core import rag
@@ -20,13 +23,35 @@ from app.core.syllabus_processing import (
     extract_text_from_file, split_into_topics,
     extract_pages_from_file, find_topic_pages,
 )
-from app.db.models import StudyMaterial, SubjectAnalysis, ScheduledTopic, User
+from app.core.syllabus_intelligence import _keyword_difficulty
+from app.db.models import StudyMaterial, SubjectAnalysis, ScheduledTopic, DeadlineItem, ProgressLog, User
 from app.db.session import get_db, AsyncSessionLocal
 
 _log = logging.getLogger(__name__)
 
 # Keep strong references to background tasks so they aren't GC'd before completing
 _background_tasks: set = set()
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+GEN_MODEL = os.getenv("OLLAMA_GEN_MODEL", "mistral:latest")
+DEADLINE_LLM_TIMEOUT_SEC = float(os.getenv("DEADLINE_LLM_TIMEOUT_SEC", "6"))
+
+# Cache Ollama reachability so repeated extraction requests do not pay the
+# full network timeout when the model server is offline or slow to start.
+_deadline_ollama_reachable: Optional[bool] = None
+
+
+async def _is_deadline_ollama_reachable() -> bool:
+    global _deadline_ollama_reachable
+    if _deadline_ollama_reachable is not None:
+        return _deadline_ollama_reachable
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_URL}/api/tags", timeout=1.5)
+            _deadline_ollama_reachable = response.status_code < 500
+    except Exception:
+        _deadline_ollama_reachable = False
+    return _deadline_ollama_reachable
 
 
 def _fire_and_forget(coro) -> None:
@@ -177,6 +202,17 @@ async def _extract_and_update_bg(
         # One folder per identified subject for clean organisation
         await _create_subject_folders(user_id=user_id, analyses=all_analyses)
 
+    if text:
+        try:
+            await _persist_deadlines(
+                material_id=material_id,
+                user_id=user_id,
+                subject=subject,
+                text=text,
+            )
+        except Exception as exc:
+            _log.debug("Deadline extraction failed for material %s: %s", material_id, exc)
+
     # RAG indexing — ALL file types (syllabus and materials) for chat help
     if text:
         await _rag_index_bg(
@@ -224,17 +260,18 @@ async def _create_scheduled_topics(
         for analysis in analyses:
             subj_name = analysis.get("subject_name", "Unknown")
             subj_code = analysis.get("subject_code", "")
-            units = analysis.get("units", [])
+            units = sorted(analysis.get("units", []), key=lambda u: u.get("unit_number", 0))
             
             for unit_idx, unit in enumerate(units):
                 unit_name = unit.get("unit_name", f"Unit {unit_idx + 1}")
                 topics = unit.get("topics", [])
+                total_topics = max(1, len(topics))
                 
                 for topic_idx, topic_item in enumerate(topics):
                     # Handle both dict and string topic formats
                     if isinstance(topic_item, dict):
                         topic_name = topic_item.get("name", "")
-                        raw_difficulty = topic_item.get("difficulty", "Medium")
+                        raw_difficulty = topic_item.get("difficulty", topic_item.get("difficultyLabel", "Medium"))
                         est_hours = topic_item.get("estimated_hours", 1.0)
                     else:
                         topic_name = str(topic_item).strip()
@@ -247,11 +284,21 @@ async def _create_scheduled_topics(
                     # Find page number from topic_pages mapping
                     page_num = topic_pages.get(topic_name)
 
-                    # Normalize types before DB insert
+                    # Preserve the extracted difficulty exactly as provided.
                     if isinstance(raw_difficulty, (int, float)):
-                        difficulty = _DIFF_MAP.get(int(raw_difficulty), "Medium")
+                        difficulty_num = max(1, min(5, int(raw_difficulty)))
                     else:
-                        difficulty = str(raw_difficulty or "Medium")
+                        normalized = str(raw_difficulty or "").strip().lower()
+                        difficulty_num = {
+                            "easy": 1,
+                            "basic": 2,
+                            "intermediate": 3,
+                            "medium": 3,
+                            "hard": 4,
+                            "advanced": 5,
+                        }.get(normalized, 3)
+
+                    difficulty = _DIFF_MAP.get(int(difficulty_num), "Medium")
 
                     try:
                         est_hours = float(est_hours or 1.0)
@@ -362,6 +409,402 @@ _ALLOWED_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".tiff", ".tif", ".bmp",
 }
 
+
+def _validate_upload_extension(filename: str) -> None:
+    ext = Path(filename).suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+        )
+
+
+_DATE_PATTERNS = [
+    r"\b\d{4}-\d{2}-\d{2}\b",
+    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+    r"\b\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}(?:\s+\d{2,4})?\b",
+    r"\b[A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{2,4})?\b",
+]
+
+
+_DEADLINE_LLM_PROMPT = """\
+Extract dated deadlines from the text below.
+
+Return only valid JSON with this schema:
+{
+  "deadlines": [
+    {
+      "title": "short title",
+      "date": "YYYY-MM-DD",
+      "subject": "optional subject or empty string",
+      "unit": "optional unit or empty string",
+      "topic": "optional topic or empty string",
+      "reason": "short explanation"
+    }
+  ]
+}
+
+Rules:
+- Extract only items that clearly have a due date, exam date, quiz date, submission date, or deadline.
+- If the year is missing, infer the most likely upcoming date from today.
+- Prefer the nearest future date if the text does not specify a year.
+- Keep titles short and human readable.
+- Format each title as "DD Month - event".
+- Use the event name after the dash, not the full source sentence.
+- Ignore unrelated notes and decorative text.
+
+TEXT:
+{text}
+"""
+
+
+def _format_deadline_title(due_date: datetime, raw_label: str, source_text: str | None = None) -> str:
+    label_source = (source_text or raw_label or "Deadline").strip()
+    label = label_source
+
+    matched_clause = None
+    for pattern in _DATE_PATTERNS:
+        for match in re.finditer(pattern, label_source):
+            parsed = _parse_deadline_date(match.group(0))
+            if parsed and parsed.date() == due_date.date():
+                for segment in re.split(r"[;\n,]", label_source):
+                    if match.group(0) in segment:
+                        matched_clause = segment.strip()
+                        break
+                if matched_clause:
+                    break
+        if matched_clause:
+            break
+
+    if matched_clause:
+        label = matched_clause
+
+    event_label = label
+    event_patterns = [
+        r"^(.*?)(?:\b(?:due|deadline|submission|submit)\b)\s*(?:\b(?:on|at|by|for|before|from)\b)?\s*" + r"(?:" + "|".join(_DATE_PATTERNS) + r")",
+        r"^(.*?)(?:\b(?:on|at|by|for|before|from)\b)\s*(?:" + "|".join(_DATE_PATTERNS) + r")",
+    ]
+    for pattern in event_patterns:
+        match = re.search(pattern, label_source, flags=re.I)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate:
+                event_label = candidate
+                break
+
+    if event_label == label_source:
+        event_label = re.sub(r"\b(?:due|deadline|submission|submit|schedule|scheduled|happening|happens)\b", "", event_label, flags=re.I)
+        event_label = re.sub(r"\b(?:on|at|by|for|from|before|the)\b", " ", event_label, flags=re.I)
+        event_label = re.sub(r"\s+", " ", event_label).strip(" -:;,." )
+
+    event_label = re.sub(r"\s+", " ", event_label).strip(" -:;,." )
+    label = event_label.strip()
+    if not label:
+        label = "Deadline"
+    else:
+        label = " ".join(word.capitalize() for word in label.split())
+
+    day_label = f"{due_date.day} {due_date.strftime('%B')}"
+    return f"{day_label} - {label}"
+
+
+def _deadline_key(*, due_date: datetime, title: str, subject: str | None, unit_name: str | None, topic_name: str | None) -> tuple:
+    return (
+        due_date.date().isoformat(),
+        title.strip().lower(),
+        (subject or '').strip().lower(),
+        (unit_name or '').strip().lower(),
+        (topic_name or '').strip().lower(),
+    )
+
+
+def _normalize_deadline_rows(rows) -> list[dict]:
+    seen: set[tuple] = set()
+    normalized: list[dict] = []
+    today = datetime.now(timezone.utc).date()
+    for row in rows:
+        due_date = row.due_date
+        if not due_date:
+            continue
+        current_status = row.status
+        if current_status != 'done':
+            due_day = due_date.date()
+            if due_day < today:
+                current_status = 'overdue'
+            elif due_day == today:
+                current_status = 'due'
+        title = _format_deadline_title(due_date, row.title, row.source_text)
+        key = _deadline_key(
+            due_date=due_date,
+            title=title,
+            subject=row.subject,
+            unit_name=row.unit_name,
+            topic_name=row.topic_name,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({
+            'id': row.id,
+            'subject': row.subject,
+            'unit_name': row.unit_name,
+            'topic_name': row.topic_name,
+            'title': title,
+            'due_date': due_date.isoformat(),
+            'status': current_status,
+            'material_id': row.material_id,
+        })
+    normalized.sort(key=lambda item: item['due_date'])
+    return normalized
+
+
+async def _llm_extract_deadlines(text: str) -> list[tuple[datetime, str, str | None, str | None]]:
+    if not await _is_deadline_ollama_reachable():
+        return []
+    prompt = _DEADLINE_LLM_PROMPT.replace("{text}", text[:5000])
+    payload = {
+        "model": GEN_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "format": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=DEADLINE_LLM_TIMEOUT_SEC) as client:
+            response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+            if response.status_code != 200:
+                _log.info("Deadline LLM unavailable: %s", response.status_code)
+                return []
+            data = response.json()
+            content = data.get("message", {}).get("content", "").strip()
+            if not content:
+                return []
+            if "```json" in content:
+                content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+            elif "```" in content:
+                content = content.split("```", 1)[1].split("```", 1)[0].strip()
+            parsed = json.loads(content)
+            items = []
+            for item in parsed.get("deadlines", []):
+                if not isinstance(item, dict):
+                    continue
+                date_text = str(item.get("date", "")).strip()
+                if not date_text:
+                    continue
+                try:
+                    due_date = datetime.fromisoformat(date_text.replace("Z", "+00:00"))
+                except Exception:
+                    due_date = _parse_deadline_date(date_text)
+                if not due_date:
+                    continue
+                title = str(item.get("title", "")).strip() or "Deadline"
+                subject = str(item.get("subject", "")).strip() or None
+                unit = str(item.get("unit", "")).strip() or None
+                topic = str(item.get("topic", "")).strip() or None
+                items.append((due_date, title, subject, topic or unit))
+            return items
+    except Exception as exc:
+        _log.info("Deadline LLM extraction failed: %s", exc)
+        return []
+
+
+def _parse_deadline_date(value: str) -> datetime | None:
+    raw = re.sub(r"(\d{1,2})(st|nd|rd|th)\b", r"\1", value.strip().replace(".", ""), flags=re.I)
+    today = datetime.now(timezone.utc)
+    formats = [
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+        "%d/%m/%y",
+        "%d-%m-%y",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d %Y",
+        "%b %d %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d %B",
+        "%d %b",
+        "%B %d",
+        "%b %d",
+    ]
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            if "%Y" not in fmt:
+                parsed = parsed.replace(year=today.year)
+                try:
+                    if parsed.date() < today.date():
+                        parsed = parsed.replace(year=today.year + 1)
+                except Exception:
+                    pass
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_deadline_candidates(text: str) -> list[tuple[datetime, str]]:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    candidates: list[tuple[datetime, str]] = []
+    keyword_re = re.compile(r"\b(due|deadline|submit|submission|exam|quiz|test|presentation|project|announcement|announced|reminder|message)\b", re.I)
+    for line in lines:
+        for pattern in _DATE_PATTERNS:
+            for match in re.finditer(pattern, line):
+                parsed = _parse_deadline_date(match.group(0))
+                if parsed and (keyword_re.search(line) or keyword_re.search(match.group(0)) or len(lines) == 1):
+                    candidates.append((parsed, line[:220]))
+    return candidates
+
+
+async def _persist_deadlines(*, material_id: int, user_id: int, subject: str, text: str) -> None:
+    regex_candidates = _extract_deadline_candidates(text)
+    candidates = [(due_date, source_text, None, None) for due_date, source_text in regex_candidates]
+
+    # Only pay the LLM cost when the fast parser found nothing useful.
+    if not candidates:
+        candidates = await _llm_extract_deadlines(text)
+    if not candidates:
+        return
+
+    unique_candidates = []
+    seen_candidates: set[tuple] = set()
+    for due_date, raw_label, subject_hint, topic_hint in candidates:
+        title = _format_deadline_title(due_date, raw_label, text)
+        key = _deadline_key(
+            due_date=due_date,
+            title=title,
+            subject=subject_hint or subject,
+            unit_name=topic_hint,
+            topic_name=topic_hint,
+        )
+        if key in seen_candidates:
+            continue
+        seen_candidates.add(key)
+        unique_candidates.append((due_date, raw_label, subject_hint, topic_hint))
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await db.execute(sql_delete(DeadlineItem).where(DeadlineItem.material_id == material_id))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
+    async with AsyncSessionLocal() as db:
+        topic_rows = await db.execute(
+            select(ScheduledTopic).where(ScheduledTopic.material_id == material_id)
+        )
+        topics = topic_rows.scalars().all()
+        topic_names = [t.topic_name for t in topics if t.topic_name]
+
+        for due_date, source_text, topic_hint, unit_hint in unique_candidates[:40]:
+            matched_topic = None
+            for topic_name in topic_names:
+                if topic_name.lower() in source_text.lower() or source_text.lower() in topic_name.lower():
+                    matched_topic = topic_name
+                    break
+            if not matched_topic and topic_hint:
+                matched_topic = topic_hint
+            status = 'overdue' if due_date.date() < datetime.now(timezone.utc).date() else 'upcoming'
+            db.add(DeadlineItem(
+                user_id=user_id,
+                material_id=material_id,
+                subject=subject or None,
+                unit_name=unit_hint,
+                topic_name=matched_topic,
+                title=_format_deadline_title(due_date, matched_topic or source_text[:120], source_text),
+                due_date=due_date,
+                source_text=source_text,
+                status=status,
+            ))
+        await db.commit()
+
+
+async def _persist_deadlines_background(*, material_id: int, user_id: int, subject: str, text: str) -> None:
+    try:
+        await _persist_deadlines(material_id=material_id, user_id=user_id, subject=subject, text=text)
+    except Exception as exc:
+        _log.warning("Background deadline extraction failed for material %s: %s", material_id, exc)
+
+
+async def _find_existing_deadline_note(*, db: AsyncSession, user_id: int, subject: str, text: str) -> StudyMaterial | None:
+    """Reuse an existing deadline note when the pasted text is identical.
+
+    This avoids creating duplicate materials and duplicate deadline rows when a
+    user retries the same paste action.
+    """
+    result = await db.execute(
+        select(StudyMaterial)
+        .where(StudyMaterial.user_id == user_id)
+        .where(StudyMaterial.kind == "deadline_note")
+        .where(StudyMaterial.subject == subject)
+        .order_by(StudyMaterial.created_at.desc())
+        .limit(20)
+    )
+    for material in result.scalars().all():
+        stored_path = getattr(material, "stored_path", None)
+        if not stored_path or not Path(stored_path).exists():
+            continue
+        try:
+            if Path(stored_path).read_text(encoding="utf-8").strip() == text.strip():
+                return material
+        except Exception:
+            continue
+    return None
+
+
+async def _material_processing_summary(db: AsyncSession, material: StudyMaterial) -> dict:
+    """Return a compact, database-backed progress snapshot for an uploaded file."""
+    analysis_result = await db.execute(
+        select(func.count(SubjectAnalysis.id)).where(SubjectAnalysis.material_id == material.id)
+    )
+    analysis_count = int(analysis_result.scalar_one() or 0)
+
+    topic_result = await db.execute(
+        select(func.count(ScheduledTopic.id)).where(ScheduledTopic.material_id == material.id)
+    )
+    topic_count = int(topic_result.scalar_one() or 0)
+
+    deadline_result = await db.execute(
+        select(func.count(DeadlineItem.id)).where(DeadlineItem.material_id == material.id)
+    )
+    deadline_count = int(deadline_result.scalar_one() or 0)
+
+    age_seconds = None
+    if material.created_at:
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - material.created_at.replace(tzinfo=timezone.utc)).total_seconds())
+
+    pending = (
+        (material.file_size or 0) > 0
+        and topic_count == 0
+        and analysis_count == 0
+        and deadline_count == 0
+        and (age_seconds is None or age_seconds < 600)
+    )
+
+    if topic_count > 0 and analysis_count > 0:
+        state = "ready"
+    elif deadline_count > 0 and material.kind == "deadline_note":
+        state = "ready"
+    elif topic_count > 0:
+        state = "topics_ready"
+    elif analysis_count > 0:
+        state = "analysis_ready"
+    elif pending:
+        state = "processing"
+    else:
+        state = "not_found"
+
+    return {
+        "state": state,
+        "processing": pending,
+        "ageSeconds": int(age_seconds or 0),
+        "topicCount": topic_count,
+        "analysisCount": analysis_count,
+        "deadlineCount": deadline_count,
+    }
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -413,6 +856,7 @@ async def upload_schedule_document(
     current_user: User = Depends(_get_user),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_upload_extension(file.filename)
     contents = await file.read()
     safe_subj = _safe(subject) if subject.strip() else None
 
@@ -461,12 +905,7 @@ async def upload_study_material(
     current_user: User = Depends(_get_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ext = Path(file.filename).suffix.lower()
-    if ext not in _ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
-        )
+    _validate_upload_extension(file.filename)
     contents = await file.read()
     safe_subj = _safe(subject) if subject.strip() else None
 
@@ -732,17 +1171,7 @@ async def list_files(
                 "topicPages": m.topic_pages or {},
                 "fileSize": m.file_size,
                 "createdAt": m.created_at.isoformat() if m.created_at else None,
-                # A file is "processing" if it has no topics yet AND was uploaded
-                # less than 10 minutes ago. After 10 min we give up polling —
-                # the user can retrigger analysis manually.
-                "processing": (
-                    len(m.topics or []) == 0
-                    and (m.file_size or 0) > 0
-                    and (
-                        m.created_at is None
-                        or (datetime.now(timezone.utc) - m.created_at.replace(tzinfo=timezone.utc)).total_seconds() < 600
-                    )
-                ),
+                **(await _material_processing_summary(db, m)),
             }
             for m in materials
         ]
@@ -764,14 +1193,7 @@ async def get_file_topics(
     if not mat:
         raise HTTPException(status_code=404, detail="File not found")
     topics = mat.topics or []
-    pending_by_age = (
-        len(topics) == 0
-        and (mat.file_size or 0) > 0
-        and (
-            mat.created_at is None
-            or (datetime.now(timezone.utc) - mat.created_at.replace(tzinfo=timezone.utc)).total_seconds() < 600
-        )
-    )
+    summary = await _material_processing_summary(db, mat)
 
     return {
         "materialId": material_id,
@@ -779,7 +1201,10 @@ async def get_file_topics(
         "topics": topics,
         "topicPages": mat.topic_pages or {},
         "unitName": mat.unit_name,
-        "processing": pending_by_age,
+        "processing": summary["processing"],
+        "processingState": summary["state"],
+        "analysisCount": summary["analysisCount"],
+        "deadlineCount": summary["deadlineCount"],
     }
 
 
@@ -811,25 +1236,23 @@ async def get_file_analysis(
     record = analysis_result.scalar_one_or_none()
 
     if record and record.analysis_json:
+        summary = await _material_processing_summary(db, mat)
         return {
             "materialId": material_id,
             "status": "ready",
             "analysis": record.analysis_json,
+            "processing": summary["processing"],
+            "processingState": summary["state"],
         }
 
     # Not yet analyzed — may be pending extraction
-    pending = (
-        (mat.file_size or 0) > 0
-        and len(mat.topics or []) == 0
-        and (
-            mat.created_at is None
-            or (datetime.now(timezone.utc) - mat.created_at.replace(tzinfo=timezone.utc)).total_seconds() < 600
-        )
-    )
+    summary = await _material_processing_summary(db, mat)
     return {
         "materialId": material_id,
-        "status": "pending" if pending else "not_found",
+        "status": "pending" if summary["processing"] else "not_found",
         "analysis": None,
+        "processing": summary["processing"],
+        "processingState": summary["state"],
     }
 
 
@@ -1006,6 +1429,11 @@ class RescheduleTopicRequest(BaseModel):
     reason: str = ""
 
 
+class DeadlineTextRequest(BaseModel):
+    subject: str = ""
+    text: str
+
+
 @router.patch("/scheduled-topics/{topic_id}/complete")
 async def mark_topic_complete(
     topic_id: int,
@@ -1033,6 +1461,16 @@ async def mark_topic_complete(
     topic.completed_date = datetime.now(timezone.utc)
     if notes:
         topic.completion_notes = notes
+
+    try:
+        db.add(ProgressLog(
+            user_id=current_user.id,
+            academic_metric=1.0,
+            attendance=1.0,
+            study_time=float(topic.estimated_hours or 1.0),
+        ))
+    except Exception as exc:
+        _log.debug("Progress log write skipped for topic %s: %s", topic_id, exc)
     
     await db.commit()
     return {
@@ -1110,7 +1548,7 @@ async def query_scheduled_topics(
     if status:
         query = query.where(ScheduledTopic.status == status)
     
-    result = await db.execute(query.order_by(ScheduledTopic.created_at))
+    result = await db.execute(query.order_by(ScheduledTopic.created_at, ScheduledTopic.subject, ScheduledTopic.unit_index, ScheduledTopic.topic_index))
     topics = result.scalars().all()
     
     return {
@@ -1122,13 +1560,207 @@ async def query_scheduled_topics(
                 "unit_name": t.unit_name,
                 "topic_name": t.topic_name,
                 "estimated_hours": t.estimated_hours,
+                "difficulty": t.difficulty,
+                "unit_index": t.unit_index,
+                "topic_index": t.topic_index,
                 "status": t.status,
                 "scheduled_date": t.scheduled_date.isoformat() if t.scheduled_date else None,
+                "completed_date": t.completed_date.isoformat() if t.completed_date else None,
+                "rescheduled_date": t.rescheduled_date.isoformat() if t.rescheduled_date else None,
                 "page_number": t.page_number,
             }
             for t in topics
         ],
     }
+
+
+@router.get("/deadlines")
+async def list_deadlines(
+    subject: str = None,
+    status: str = None,
+    current_user: User = Depends(_get_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(DeadlineItem).where(DeadlineItem.user_id == current_user.id)
+    if subject:
+        query = query.where(DeadlineItem.subject == subject)
+    if status:
+        query = query.where(DeadlineItem.status == status)
+    result = await db.execute(query.order_by(DeadlineItem.due_date.asc()))
+    rows = result.scalars().all()
+    items = _normalize_deadline_rows(rows)
+    return {'count': len(items), 'deadlines': items}
+
+
+@router.post("/deadlines/from-text")
+async def extract_deadlines_from_text(
+    payload: DeadlineTextRequest,
+    current_user: User = Depends(_get_user),
+    db: AsyncSession = Depends(get_db),
+):
+    text = (payload.text or "").strip()
+    if len(text) < 5:
+        raise HTTPException(status_code=400, detail="Paste some deadline text first.")
+
+    subject = (payload.subject or "").strip() or _detect_subject(text, "deadline note") or "General"
+
+    existing_material = await _find_existing_deadline_note(
+        db=db,
+        user_id=current_user.id,
+        subject=subject,
+        text=text,
+    )
+    if existing_material:
+        result = await db.execute(
+            select(DeadlineItem)
+            .where(DeadlineItem.user_id == current_user.id)
+            .where(DeadlineItem.material_id == existing_material.id)
+            .order_by(DeadlineItem.due_date.asc())
+        )
+        rows = result.scalars().all()
+        items = [
+            {
+                'id': row.id,
+                'subject': row.subject,
+                'unit_name': row.unit_name,
+                'topic_name': row.topic_name,
+                'title': row.title,
+                'due_date': row.due_date.isoformat() if row.due_date else None,
+                'status': row.status,
+                'material_id': row.material_id,
+            }
+            for row in rows
+        ]
+
+        return {
+            'message': 'Deadline text extracted',
+            'status': 'completed' if items else 'processing',
+            'processing': False,
+            'subject': subject,
+            'material_id': existing_material.id,
+            'count': len(items),
+            'deadlines': items,
+        }
+
+    note_dir = UPLOAD_ROOT / str(current_user.id) / subject / "deadline_notes"
+    note_dir.mkdir(parents=True, exist_ok=True)
+    file_name = f"deadline-note-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.txt"
+    note_path = note_dir / file_name
+    note_path.write_text(text, encoding='utf-8')
+
+    material = StudyMaterial(
+        user_id=current_user.id,
+        subject=subject,
+        unit_name=None,
+        filename=file_name,
+        stored_path=str(note_path),
+        kind='deadline_note',
+        topics=[],
+        file_size=len(text.encode('utf-8')),
+    )
+    db.add(material)
+    await db.commit()
+    await db.refresh(material)
+
+    regex_candidates = _extract_deadline_candidates(text)
+    if regex_candidates:
+        await _persist_deadlines(
+            material_id=material.id,
+            user_id=current_user.id,
+            subject=subject,
+            text=text,
+        )
+        status = "completed"
+        processing = False
+    else:
+        _fire_and_forget(_persist_deadlines_background(
+            material_id=material.id,
+            user_id=current_user.id,
+            subject=subject,
+            text=text,
+        ))
+        status = "processing"
+        processing = True
+
+    result = await db.execute(
+        select(DeadlineItem)
+        .where(DeadlineItem.user_id == current_user.id)
+        .where(DeadlineItem.material_id == material.id)
+        .order_by(DeadlineItem.due_date.asc())
+    )
+    rows = result.scalars().all()
+    items = [
+        {
+            'id': row.id,
+            'subject': row.subject,
+            'unit_name': row.unit_name,
+            'topic_name': row.topic_name,
+            'title': row.title,
+            'due_date': row.due_date.isoformat() if row.due_date else None,
+            'status': row.status,
+            'material_id': row.material_id,
+        }
+        for row in rows
+    ]
+
+    return {
+        'message': 'Deadline text extracted',
+        'status': status,
+        'processing': processing,
+        'subject': subject,
+        'material_id': material.id,
+        'count': len(items),
+        'deadlines': items,
+    }
+
+
+@router.patch("/deadlines/{deadline_id}/done")
+async def mark_deadline_done(
+    deadline_id: int,
+    current_user: User = Depends(_get_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(DeadlineItem).where(DeadlineItem.id == deadline_id).where(DeadlineItem.user_id == current_user.id)
+    )
+    deadline = result.scalar_one_or_none()
+    if not deadline:
+        raise HTTPException(status_code=404, detail='Deadline not found')
+
+    deadline.status = 'done'
+    await db.commit()
+    await db.refresh(deadline)
+    return {
+        'message': 'Deadline marked done',
+        'deadline': {
+            'id': deadline.id,
+            'subject': deadline.subject,
+            'unit_name': deadline.unit_name,
+            'topic_name': deadline.topic_name,
+            'title': _format_deadline_title(deadline.due_date, deadline.title, deadline.source_text),
+            'due_date': deadline.due_date.isoformat() if deadline.due_date else None,
+            'status': deadline.status,
+            'material_id': deadline.material_id,
+        },
+    }
+
+
+@router.delete("/deadlines/{deadline_id}")
+async def delete_deadline(
+    deadline_id: int,
+    current_user: User = Depends(_get_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(DeadlineItem).where(DeadlineItem.id == deadline_id).where(DeadlineItem.user_id == current_user.id)
+    )
+    deadline = result.scalar_one_or_none()
+    if not deadline:
+        raise HTTPException(status_code=404, detail='Deadline not found')
+
+    await db.delete(deadline)
+    await db.commit()
+    return {'message': 'Deadline deleted'}
 
 
 @router.get("/files/{material_id}/download")
@@ -1195,6 +1827,7 @@ async def delete_file(
 class ChatRequest(BaseModel):
     question: str
     subject: Optional[str] = None
+    material_id: Optional[int] = None
 
 
 @router.get("/topic-resources")
@@ -1256,6 +1889,7 @@ async def chat_with_study_bot(
         user_id=current_user.id,
         question=body.question,
         db=db,
+        material_id=body.material_id,
     )
 
 
@@ -1283,6 +1917,7 @@ async def stream_chat(
                 user_id=current_user.id,
                 question=body.question,
                 db=db,
+                material_id=body.material_id,
             ):
                 yield f"data: {json.dumps({'token': token})}\n\n"
         except Exception as exc:

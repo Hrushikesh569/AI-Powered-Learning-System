@@ -18,7 +18,8 @@ import asyncio
 import json
 import logging
 import os
-from typing import AsyncIterator, Optional
+import re
+from typing import Any, AsyncIterator, Optional, cast
 
 import httpx
 import numpy as np
@@ -33,11 +34,93 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://ollama:11434")
 EMBED_MODEL  = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-GEN_MODEL    = os.getenv("OLLAMA_GEN_MODEL",   "llama3.2:1b")
+GEN_MODEL    = os.getenv("OLLAMA_GEN_MODEL",   "mistral:latest")
+EMBED_TIMEOUT_SEC = float(os.getenv("RAG_EMBED_TIMEOUT_SEC", "8"))
+GEN_TIMEOUT_SEC = float(os.getenv("RAG_GEN_TIMEOUT_SEC", "12"))
+
+# Cache Ollama reachability so repeated requests do not stall on a dead model
+# server. The app can still serve keyword and context-only fallbacks.
+_ollama_reachable: Optional[bool] = None
+
+
+async def _is_ollama_reachable() -> bool:
+    global _ollama_reachable
+    if _ollama_reachable is not None:
+        return _ollama_reachable
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{OLLAMA_URL}/api/tags", timeout=1.5)
+            _ollama_reachable = response.status_code < 500
+    except Exception:
+        _ollama_reachable = False
+    return _ollama_reachable
 
 # Chunk parameters (word-based with overlap)
 CHUNK_SIZE   = 300   # words per chunk
 CHUNK_OVERLAP = 60   # words shared between consecutive chunks
+
+
+def _clean_context_text(text: str) -> str:
+    cleaned = re.sub(r"[\u2500-\u257f]{3,}", " ", text or "")
+    cleaned = re.sub(r"\s*\|\s*", " ", cleaned)
+    cleaned = re.sub(r"\[\d+\]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _format_sources(chunks: list[dict]) -> list[str]:
+    seen: list[str] = []
+    for chunk in chunks:
+        filename = chunk.get("filename") or chunk.get("subject") or "Study material"
+        if filename not in seen:
+            seen.append(filename)
+    return seen[:5]
+
+
+def _build_tutor_answer(question: str, chunks: list[dict], llm_answer: str | None = None) -> dict:
+    sources = _format_sources(chunks)
+    key_points = []
+    for chunk in chunks[:3]:
+        snippet = _clean_context_text(chunk.get("text", ""))[:180]
+        if snippet:
+            key_points.append(snippet)
+
+    answer_text = llm_answer.strip() if llm_answer else ""
+    if not answer_text:
+        summary = "I found the most relevant parts of your material and turned them into a short study guide."
+        if key_points:
+            answer_text = (
+                f"## Simple Summary\n{summary}\n\n"
+                f"## Direct Answer\n{_clean_context_text(chunks[0].get('text', ''))[:320]}\n\n"
+                f"## Key Points\n- " + "\n- ".join(key_points)
+            )
+        else:
+            answer_text = (
+                "## Simple Summary\nI could not find enough indexed material yet.\n\n"
+                "## Direct Answer\nUpload a PDF, PPT, or DOC file from the syllabus page so I can explain it like a tutor.\n\n"
+                "## Suggested Questions\n- What are the main ideas in this topic?\n- Can you explain this in simpler terms?\n- Give me a quick practice question."
+            )
+
+    if "## Suggested Questions" not in answer_text:
+        answer_text = (
+            f"{answer_text.rstrip()}\n\n"
+            "## Suggested Questions\n"
+            f"- What is the easiest way to remember the core idea behind {question.strip()}?\n"
+            f"- Can you explain the topic step by step with an example?\n"
+            "- What is one likely exam question from this material?"
+        )
+
+    return {
+        "answer": answer_text,
+        "summary": _clean_context_text(chunks[0].get("text", ""))[:220] if chunks else "",
+        "key_points": key_points,
+        "suggested_questions": [
+            f"What is the simplest way to understand {question.strip()}?",
+            "Can you teach this topic with a short example?",
+            "What should I revise first before an exam?",
+        ],
+        "sources": sources,
+    }
 
 # ── Text chunking ────────────────────────────────────────────────────────────
 
@@ -65,7 +148,7 @@ async def _embed_one(text: str, client: httpx.AsyncClient) -> Optional[list[floa
         r = await client.post(
             f"{OLLAMA_URL}/api/embeddings",
             json={"model": EMBED_MODEL, "prompt": text},
-            timeout=30.0,
+            timeout=EMBED_TIMEOUT_SEC,
         )
         if r.status_code == 200:
             return r.json().get("embedding")
@@ -76,6 +159,8 @@ async def _embed_one(text: str, client: httpx.AsyncClient) -> Optional[list[floa
 
 async def _embed_batch(texts: list[str]) -> list[Optional[list[float]]]:
     """Embed a list of texts in parallel (max 6 concurrent to avoid OOM)."""
+    if not await _is_ollama_reachable():
+        return [None] * len(texts)
     sem = asyncio.Semaphore(6)
 
     async def _bounded(text: str, client: httpx.AsyncClient) -> Optional[list[float]]:
@@ -139,16 +224,20 @@ async def retrieve(
     user_id: int,
     query: str,
     db: AsyncSession,
+    material_id: int | None = None,
     k: int = 6,
 ) -> list[dict]:
     """Embed query, return top-k chunks by cosine similarity."""
+    if not await _is_ollama_reachable():
+        return await _keyword_fallback(user_id=user_id, query=query, db=db, material_id=material_id, k=k)
+
     # Embed the query
     async with httpx.AsyncClient() as client:
         q_emb = await _embed_one(query, client)
 
     if q_emb is None:
         # Ollama not available — fall back to simple keyword match
-        return await _keyword_fallback(user_id=user_id, query=query, db=db, k=k)
+        return await _keyword_fallback(user_id=user_id, query=query, db=db, material_id=material_id, k=k)
 
     # Load user's embedded chunks
     result = await db.execute(
@@ -157,6 +246,8 @@ async def retrieve(
         .where(DocumentChunk.embedding.isnot(None))
     )
     chunks = result.scalars().all()
+    if material_id is not None:
+        chunks = [chunk for chunk in chunks if cast(Any, chunk).material_id == material_id]
     if not chunks:
         return []
 
@@ -179,13 +270,14 @@ async def retrieve(
 
 
 async def _keyword_fallback(
-    *, user_id: int, query: str, db: AsyncSession, k: int
+    *, user_id: int, query: str, db: AsyncSession, material_id: int | None, k: int
 ) -> list[dict]:
     """Simple keyword match when Ollama embedding is unavailable."""
     keywords = [w.lower() for w in query.split() if len(w) > 2]
-    result = await db.execute(
-        select(DocumentChunk).where(DocumentChunk.user_id == user_id)
-    )
+    query_builder = select(DocumentChunk).where(DocumentChunk.user_id == user_id)
+    if material_id is not None:
+        query_builder = query_builder.where(DocumentChunk.material_id == material_id)
+    result = await db.execute(query_builder)
     scored = []
     for c in result.scalars().all():
         hits = sum(1 for kw in keywords if kw in c.content.lower())
@@ -203,66 +295,51 @@ async def answer(
     user_id: int,
     question: str,
     db: AsyncSession,
+    material_id: int | None = None,
 ) -> dict:
     """Full RAG: retrieve relevant chunks, then generate an answer with Ollama."""
-    chunks = await retrieve(user_id=user_id, query=question, db=db)
-
-    sources = list({c["filename"] for c in chunks if c["filename"]})
+    chunks = await retrieve(user_id=user_id, query=question, db=db, material_id=material_id)
 
     if not chunks:
-        return {
-            "answer": (
-                "I don't have any indexed study materials for your account yet. "
-                "Upload a PDF or PPTX from the Syllabus & Files page and I'll be "
-                "able to answer questions directly from your course content!"
-            ),
-            "sources": [],
-        }
+        return _build_tutor_answer(question, [])
 
     context = "\n\n".join(
-        f"[{i+1}] ({c['subject']}) {c['text']}"
+        f"[{i+1}] {c['filename'] or c['subject']}: {_clean_context_text(c['text'])}"
         for i, c in enumerate(chunks)
     )
 
     prompt = (
-        "You are a concise AI study assistant. Answer the student's question "
-        "using ONLY the study material context below. "
-        "Be educational, accurate, and brief (3-5 sentences max).\n\n"
-        f"Study material context:\n{context}\n\n"
-        f"Student question: {question}\n\n"
-        "Answer:"
+        "You are a patient tutor teaching a student from their uploaded material. "
+        "Use only the context provided. Do not copy raw chunk separators, markdown delimiters, or OCR noise. "
+        "Return a clear teaching answer in markdown with these sections exactly: "
+        "## Simple Summary, ## Direct Answer, ## Key Points, ## Suggested Questions. "
+        "Keep it concise but explanatory, like a real teacher.",
+        "\n\nContext:\n",
+        context,
+        "\n\nStudent question:\n",
+        question,
+        "\n\nAnswer now:"
     )
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=GEN_TIMEOUT_SEC) as client:
             r = await client.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
                     "model":  GEN_MODEL,
-                    "prompt": prompt,
+                    "prompt": "".join(prompt),
                     "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 350},
+                    "options": {"temperature": 0.25, "num_predict": 450},
                 },
             )
             if r.status_code == 200:
                 llm_answer = r.json().get("response", "").strip()
                 if llm_answer:
-                    return {"answer": llm_answer, "sources": sources}
+                    return _build_tutor_answer(question, chunks, llm_answer=llm_answer)
     except Exception as exc:
         logger.info("Ollama generate unavailable (%s) — using context-only fallback", exc)
 
-    # ── Fallback: return well-formatted context snippets ──────────────────
-    bullets = "\n\n".join(
-        f"**From {c['filename']} ({c['subject']}):**\n{c['text'][:300]}{'...' if len(c['text']) > 300 else ''}"
-        for c in chunks[:3]
-    )
-    fallback = (
-        f"Here's the most relevant content I found in your study materials:\n\n"
-        f"{bullets}\n\n"
-        "_Note: The AI generation model (Ollama) isn't running. "
-        "Start Ollama and pull `llama3.2:1b` for full LLM-powered answers._"
-    )
-    return {"answer": fallback, "sources": sources}
+    return _build_tutor_answer(question, chunks)
 
 
 # ── Ollama health ─────────────────────────────────────────────────────────────
@@ -287,72 +364,12 @@ async def answer_stream(
     user_id: int,
     question: str,
     db: AsyncSession,
+    material_id: int | None = None,
 ) -> AsyncIterator[str]:
     """Streaming variant of answer(): yields raw token strings from Ollama.
 
     Falls back to yielding the full fallback text as one chunk if Ollama is
     unavailable, so the caller doesn't need special-case handling.
     """
-    chunks = await retrieve(user_id=user_id, query=question, db=db)
-
-    if not chunks:
-        yield (
-            "I don't have any indexed study materials for your account yet. "
-            "Upload a PDF or PPTX from the Syllabus & Files page and I'll be "
-            "able to answer questions directly from your course content!"
-        )
-        return
-
-    context = "\n\n".join(
-        f"[{i+1}] ({c['subject']}) {c['text']}"
-        for i, c in enumerate(chunks)
-    )
-    prompt = (
-        "You are a concise AI study assistant. Answer the student's question "
-        "using ONLY the study material context below. "
-        "Be educational, accurate, and brief (3-5 sentences max).\n\n"
-        f"Study material context:\n{context}\n\n"
-        f"Student question: {question}\n\n"
-        "Answer:"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                f"{OLLAMA_URL}/api/generate",
-                json={
-                    "model": GEN_MODEL,
-                    "prompt": prompt,
-                    "stream": True,
-                    "options": {"temperature": 0.3, "num_predict": 350},
-                },
-            ) as r:
-                if r.status_code == 200:
-                    async for line in r.aiter_lines():
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except Exception:
-                            continue
-                        token = data.get("response", "")
-                        if token:
-                            yield token
-                        if data.get("done"):
-                            return
-    except Exception as exc:
-        logger.info("Ollama streaming unavailable (%s) — using context-only fallback", exc)
-
-    # ── Fallback: emit formatted context snippets as a single chunk ──────────
-    sources = list({c["filename"] for c in chunks if c["filename"]})
-    fallback_lines = [
-        f"From **{c['filename']}** ({c['subject']}):\n{c['text'][:300]}{'...' if len(c['text']) > 300 else ''}"
-        for c in chunks[:3]
-    ]
-    yield (
-        "Here's the most relevant content I found in your study materials:\n\n"
-        + "\n\n".join(fallback_lines)
-        + "\n\n_Note: The AI model (Ollama) isn't running. "
-        "Start Ollama and pull `llama3.2:1b` for full LLM-powered answers._"
-    )
+    response = await answer(user_id=user_id, question=question, db=db, material_id=material_id)
+    yield response.get("answer", "")

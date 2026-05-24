@@ -1,0 +1,93 @@
+{
+  "subject_name": "Operating Systems",
+  "subject_code": "22PC1IT202",
+  "overview": "Course materials for Operating Systems.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Operating System Overview: Overview of Computer Operating Systems",
+        "Operating System Functions",
+        "Operating System Services and Systems Calls",
+        "System Programs. Process Concept: Process Concepts",
+        "Process states. Threads",
+        "Multithreading"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Process Management: Scheduling-Criteria",
+        "CPU Scheduling",
+        "Algorithms Evaluation",
+        "Thread Scheduling. Process   Synchronization: Critical-Section   Problem",
+        "Peterson‘s   Solution",
+        "Synchronization Hardware",
+        "Semaphores",
+        "Classic Problems of Synchronization",
+        "Producer",
+        "Consumer problem",
+        "Dining philosophers problem",
+        "Readers",
+        "Writers Problem",
+        "Monitors",
+        "Synchronization examples"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Inter Process Communication: Message passing",
+        "Shared memory Deadlock: Deadlock System Model",
+        "Deadlock Characterization",
+        "Deadlock Prevention",
+        "Detection and Avoidance",
+        "Recovery from Deadlock"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Memory Management: Memory Management Swapping",
+        "Contiguous Memory Allocation",
+        "Paging",
+        "Page-Table Structure",
+        "Segmentation",
+        "Virtual Memory",
+        "Demand Paging",
+        "Page-Replacement Algorithms",
+        "Frames Allocation",
+        "Thrashing. File System Interface: File Concepts",
+        "Access Methods and Directory Structure",
+        "File System Mounting",
+        "File Sharing and Protection",
+        "Allocation Methods",
+        "Free-Space Management",
+        "Efficiency and Performance"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Mass Storage: Overview Mass-Storage Structure",
+        "Disk Structure",
+        "Disk Attachment",
+        "Disk Scheduling",
+        "Swap-Space Management",
+        "RAID Structure Protection: Protection Goals of Protection",
+        "Principles of Protection",
+        "Domain of Protection Access Matrix",
+        "Implementation of Access Matrix",
+        "Security:  Security Problem",
+        "Program Threats",
+        "System and Network Threats Case Study: Windows Operating system",
+        "Linux Operating System"
+      ]
+    }
+  ]
+}

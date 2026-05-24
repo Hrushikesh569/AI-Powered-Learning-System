@@ -17,7 +17,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-GEN_MODEL = os.getenv("OLLAMA_GEN_MODEL", "llama3.2:1b")
+GEN_MODEL = os.getenv("OLLAMA_GEN_MODEL", "mistral:latest")
 
 
 _TOPIC_EXTRACTION_PROMPT = """\

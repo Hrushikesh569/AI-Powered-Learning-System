@@ -1,0 +1,78 @@
+{
+  "subject_name": "Artificial Intelligence",
+  "subject_code": "22PC1AM301",
+  "overview": "Course materials for Artificial Intelligence.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Introduction:  AI problems",
+        "The foundations of AI and history of AI",
+        "Intelligent agents: Agents and Environments",
+        "The concept of rationality",
+        "The nature of environments",
+        "The structure of agents",
+        "Problem solving agents",
+        "Problem formulation"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Searching: Searching for solutions",
+        "Uniformed search strategies",
+        "Breadth first search",
+        "Depth limited Search. Search with partial information (Heuristic search) Greedy best first search",
+        "A* search",
+        "Memory -bounded heuristic search Local search algorithms- Hill climbing",
+        "Simulated annealing search",
+        "Local beam search",
+        "Genetic algorithms"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Constraint Satisfaction Problems: Backtracking search for CSP’s",
+        "Local search for CSP Game Playing: Adversial search",
+        "Games",
+        "Minimax algorithm",
+        "Optimal decisions in multiplayer games",
+        "Alpha-Beta pruning",
+        "Evaluation functions",
+        "Cutting of search"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Knowledge Representation: Procedural Versus Declarative knowledge",
+        "Using Predicate logic",
+        "Representing facts in logic",
+        "Functions and predicates",
+        "Conversion to clause form",
+        "Resolution in propositional logic",
+        "Resolution in predicate logic",
+        "Unification"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Learning: What is learning",
+        "Learning by Taking Advice",
+        "Learning in Problem-solving",
+        "Learning from example: induction",
+        "Explanation-based learning. Expert System: Representing and using Domain Knowledge",
+        "Reasoning with knowledge",
+        "Expert System Shells-examples",
+        "Knowledge acquisition skills-examples"
+      ]
+    }
+  ]
+}

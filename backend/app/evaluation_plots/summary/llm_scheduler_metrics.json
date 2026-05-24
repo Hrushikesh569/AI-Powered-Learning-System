@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-04-23T19:07:27.503738Z",
+  "model": "rag-llm",
+  "source": "scheduled_topics",
+  "input_counts": {
+    "completed": 2,
+    "missed": 0,
+    "skipped": 0,
+    "do_later": 12,
+    "pending": 2178
+  },
+  "planner": {
+    "mode": "rag-llm",
+    "used_llm": false,
+    "topic_guidance_count": 545,
+    "llm_summary": {}
+  },
+  "subject_count": 11,
+  "evaluated_topics": 2180,
+  "total_topics_available": 2180,
+  "scheduled_topics": 2180,
+  "schedule_days": 2138,
+  "coverage_ratio": 1.0,
+  "frontload_ratio": 0.0,
+  "average_difficulty": 4.0,
+  "cross_subject_relations": 0,
+  "forced_topic_offset_mean": 186.0714,
+  "first_three_days_topics": 0,
+  "start_date": "2026-04-25",
+  "end_date": "2032-04-13"
+}

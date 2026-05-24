@@ -1,4 +1,4 @@
-# Learning Schedule Generator Agent (RL)
+# Learning Schedule Generator Agent (legacy baseline)
 # Generates personalized weekly study schedule
 
 import numpy as np

@@ -1,0 +1,87 @@
+{
+  "subject_name": "Computer Networks",
+  "subject_code": "22PC1IN202",
+  "overview": "Course materials for Computer Networks.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Data Communication Components: Representation of data and its flow Networks",
+        "Various Connection Topology",
+        "Protocols and Standards",
+        "OSI model",
+        "Transmission Media",
+        "Overview of LAN: Wired LAN",
+        "Wireless LANs",
+        "Connecting LAN and Virtual LAN",
+        "Techniques for Band width utilization: Multiplexing",
+        "Frequency division",
+        "Time division",
+        "And Wave division",
+        "Conceptson spread spectrum"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Data Link Layer and Medium Access Sub Layer: Error Detection and Error Correction- Fundamentals",
+        "Block coding",
+        "Hamming Distance",
+        "CRC",
+        "Flow Control and Error control protocols",
+        "Stop and Wait",
+        "Go back",
+        "N ARQ",
+        "Selective Repeat ARQ",
+        "Sliding Window",
+        "Piggybacking",
+        "Random Access",
+        "Multiple access protocols -Pure ALOHA",
+        "Slotted ALOHA"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Network Layer: Switching",
+        "Logical addressing",
+        "IPV4",
+        "IPV6",
+        "Address mapping",
+        "ARP",
+        "RARP",
+        "And DHCP–Delivery",
+        "Forwarding",
+        "And Unicast Routing protocols"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Transport Layer: Process to Process Communication",
+        "User Datagram Protocol",
+        "Transmission Control Protocol",
+        "SCTP Congestion Control",
+        "Quality of Service",
+        "QoS improving techniques: Leaky Bucket and Token Bucket algorithm"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Application Layer:  Domain Name Space",
+        "DDNS",
+        "File Transfer Protocol",
+        "WWW",
+        "HTTP",
+        "SNMP",
+        "Firewalls"
+      ]
+    }
+  ]
+}

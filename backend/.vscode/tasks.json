@@ -4,7 +4,7 @@
 		{
 			"label": "Run Backend (FastAPI)",
 			"type": "shell",
-			"command": "uvicorn app.main:app --reload",
+			"command": "uvicorn backend.api:app --reload",
 			"args": [],
 			"isBackground": true,
 			"problemMatcher": [

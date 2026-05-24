@@ -17,6 +17,10 @@ celery.conf.beat_schedule = {
         'task': 'app.core.alerts.run_alerts_check_task',
         'schedule': 300.0,
     },
+    'run-study-notifications-hourly': {
+        'task': 'app.core.study_notifications.run_study_notifications_task',
+        'schedule': 3600.0,
+    },
     # ── Full scheduled retrain every Sunday at 02:00 UTC ────────────────────
     'retrain-agents-weekly': {
         'task': 'app.core.automation.retrain_all_agents_task',

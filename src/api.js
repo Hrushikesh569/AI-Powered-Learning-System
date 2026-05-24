@@ -1,7 +1,7 @@
 // Centralized API client for backend integration
 const _envBase = (import.meta.env.VITE_API_URL || '').trim();
 const _normalizedBase = (() => {
-  if (!_envBase) return 'http://localhost:8000/api/v1';
+  if (!_envBase) return 'http://127.0.0.1:8000/api/v1';
   // Accept either a root URL (http://localhost:8000) or full API prefix.
   return /\/api\/v1\/?$/.test(_envBase)
     ? _envBase.replace(/\/$/, '')
@@ -101,6 +101,9 @@ export const agentAPI = {
   // Auth
   login: (data) => apiRequest('/auth/login', 'POST', data),
   register: (data) => apiRequest('/auth/register', 'POST', data),
+  verifyEmail: (data) => apiRequest('/auth/verify-email', 'POST', data),
+  resendVerification: (data) => apiRequest('/auth/resend-verification', 'POST', data),
+  googleLogin: (data) => apiRequest('/auth/google', 'POST', data),
   updateProfile: (data, token) => apiRequest('/auth/profile', 'PATCH', data, token),
 
   // User
@@ -150,6 +153,15 @@ export const agentAPI = {
     if (win) win.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
     else setTimeout(() => URL.revokeObjectURL(url), 60000);
   },
+  getFileBlobUrl: async (materialId) => {
+    const token = getAuthToken();
+    const resp = await fetch(`${BASE_URL}/content/files/${materialId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) throw new Error('Could not load file preview');
+    const blob = await resp.blob();
+    return URL.createObjectURL(blob);
+  },
 
   // ── AI Study Chatbot ────────────────────────────────────────────────────
   chatWithBot: (data, token) => apiRequest('/content/chat', 'POST', data, token),
@@ -183,6 +195,19 @@ export const agentAPI = {
     if (filters.status) params.append('status', filters.status);
     return apiRequest(`/content/scheduled-topics?${params}`, 'GET', null, token);
   },
+  getDeadlines: (filters = {}, token) => {
+    const params = new URLSearchParams();
+    if (filters.subject) params.append('subject', filters.subject);
+    if (filters.status) params.append('status', filters.status);
+    return apiRequest(`/content/deadlines?${params}`, 'GET', null, token);
+  },
+  extractDeadlinesFromText: (data, token) =>
+    apiRequest('/content/deadlines/from-text', 'POST', data, token),
+  markDeadlineDone: (deadlineId, token) =>
+    apiRequest(`/content/deadlines/${deadlineId}/done`, 'PATCH', null, token),
+  deleteDeadline: (deadlineId, token) =>
+    apiRequest(`/content/deadlines/${deadlineId}`, 'DELETE', null, token),
+  getCompletedTopics: (token) => apiRequest('/content/scheduled-topics?status=completed', 'GET', null, token),
   // Topic-page lookup — find PDFs that cover a topic + what page
   getTopicPages: (topic, subject = '', token) => {
     const params = new URLSearchParams({ topic });

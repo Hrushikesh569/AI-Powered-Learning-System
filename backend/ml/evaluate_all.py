@@ -82,6 +82,63 @@ def save_metrics_row(store, agent, model, metrics_dict):
     store.append({'agent': agent, 'model': model, **metrics_dict})
 
 
+def _lgb_feature_names(model, fallback_count=None):
+    """Return feature names from either a Booster or sklearn-style LightGBM wrapper."""
+    if hasattr(model, 'feature_name_') and model.feature_name_ is not None:
+        return list(model.feature_name_)
+    if hasattr(model, 'booster_') and getattr(model.booster_, 'feature_name', None):
+        try:
+            return list(model.booster_.feature_name())
+        except Exception:
+            pass
+    if hasattr(model, 'feature_name'):
+        try:
+            names = model.feature_name()
+            if names:
+                return list(names)
+        except Exception:
+            pass
+    if fallback_count is not None:
+        return [f'f{i}' for i in range(fallback_count)]
+    return []
+
+
+def _lgb_predict_proba(model, X):
+    """Return positive-class probabilities for binary models or class probabilities for multiclass models."""
+    if hasattr(model, 'predict_proba'):
+        return model.predict_proba(X)
+    return model.predict(X)
+
+
+def _lgb_importance(model, importance_type='gain'):
+    """Return feature importances from either a Booster or sklearn-style LightGBM wrapper."""
+    if hasattr(model, 'feature_importance'):
+        try:
+            return model.feature_importance(importance_type=importance_type)
+        except Exception:
+            pass
+    if hasattr(model, 'booster_') and getattr(model.booster_, 'feature_importance', None):
+        try:
+            return model.booster_.feature_importance(importance_type=importance_type)
+        except Exception:
+            pass
+    if hasattr(model, 'feature_importances_'):
+        return np.asarray(model.feature_importances_)
+    return np.array([])
+
+
+def _current_streak(values):
+    streaks = []
+    streak = 0
+    for value in values:
+        if value == 1:
+            streak += 1
+        else:
+            streak = 0
+        streaks.append(streak)
+    return streaks
+
+
 # ─────────────────────────────────────────────────────────────
 # 1. PROGRESS AGENT — LGB (22 engineered features)
 # ─────────────────────────────────────────────────────────────
@@ -90,25 +147,44 @@ print('\n[1/4] PROGRESS AGENT ────────────────�
 all_metrics = []
 
 def _fe_progress(df):
-    """Replicate the 22-feature engineering pipeline for the progress LGB model."""
+    """Build the progress model feature set from the available raw CSV columns."""
     df = df.copy()
     df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
     df = df.sort_values(['user_id', 'timestamp']).reset_index(drop=True)
 
-    df['hour']  = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce').dt.hour.fillna(12)
-    df['dow']   = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce').dt.dayofweek.fillna(0)
+    timestamp_dt = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
+    df['hour']  = timestamp_dt.dt.hour.fillna(12)
+    df['dow']   = timestamp_dt.dt.dayofweek.fillna(0)
+    df['month'] = timestamp_dt.dt.month.fillna(1)
+    df['time_bucket'] = pd.cut(
+        df['hour'],
+        bins=[-1, 5, 11, 17, 21, 24],
+        labels=[0, 1, 2, 3, 4],
+    ).astype('float').fillna(2).astype(int)
+
+    df['part'] = pd.to_numeric(df.get('part', 0), errors='coerce').fillna(0).astype(float)
+    part_scale = float(df['part'].max() or 1.0)
+    df['difficulty'] = (df['part'] / part_scale).clip(0, 1)
+    df['dataset_cat'] = 0
+    df['pq_time'] = pd.to_numeric(df.get('prior_question_elapsed_time', 0), errors='coerce').fillna(0)
+    df['pq_exp'] = pd.to_numeric(df.get('prior_question_had_explanation', 0), errors='coerce').fillna(0)
 
     # Frequency encodings
     qf = df['question_id'].value_counts(); df['q_freq'] = df['question_id'].map(qf)
     uf = df['user_id'].value_counts();     df['u_freq'] = df['user_id'].map(uf)
+    df['q_total'] = df.groupby('question_id').cumcount()
 
     # User-level cumulative stats
     grp = df.groupby('user_id', sort=False)
     df['u_total']   = grp.cumcount()
     df['u_cum_acc'] = grp['correct'].transform(lambda s: s.shift(1).expanding().mean().fillna(0.5))
     df['u_roll5']   = grp['correct'].transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean().fillna(0.5))
+    df['u_roll3']   = grp['correct'].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean().fillna(0.5))
     df['u_roll10']  = grp['correct'].transform(lambda s: s.shift(1).rolling(10, min_periods=1).mean().fillna(0.5))
     df['u_roll20']  = grp['correct'].transform(lambda s: s.shift(1).rolling(20, min_periods=1).mean().fillna(0.5))
+    df['u_ewm3']    = grp['correct'].transform(lambda s: s.shift(1).ewm(span=3, adjust=False).mean().fillna(0.5))
+    df['u_ewm5']    = grp['correct'].transform(lambda s: s.shift(1).ewm(span=5, adjust=False).mean().fillna(0.5))
+    df['u_ewm10']   = grp['correct'].transform(lambda s: s.shift(1).ewm(span=10, adjust=False).mean().fillna(0.5))
 
     # Trend (slope of last 10 answers)
     def _slope(s):
@@ -122,46 +198,60 @@ def _fe_progress(df):
                 out.append(float(np.polyfit(range(len(w)), w, 1)[0]))
         return pd.Series(out, index=s.index)
     df['u_trend'] = grp['correct'].transform(_slope)
+    df['u_streak'] = grp['correct'].transform(lambda s: pd.Series(_current_streak(s.shift(1).fillna(0).astype(int).tolist()), index=s.index))
 
     df['prev_correct'] = grp['correct'].shift(1).fillna(0.5)
 
     # Difficulty-level accuracy per user
-    diff_acc = df.groupby(['user_id', 'difficulty'])['correct'].transform(
+    diff_acc = df.groupby(['user_id', 'part'])['correct'].transform(
         lambda s: s.shift(1).expanding().mean().fillna(0.5))
     df['u_diff_acc'] = diff_acc
+
+    df['u_target_enc'] = df['u_cum_acc']
 
     # Question-level cumulative accuracy
     qgrp = df.groupby('question_id', sort=False)
     df['q_cum_acc'] = qgrp['correct'].transform(lambda s: s.shift(1).expanding().mean().fillna(0.5))
     df['q_hardness'] = 1 - df['q_cum_acc']
+    df['q_target_enc'] = df['q_cum_acc']
+    df['q_total'] = qgrp.cumcount()
 
     # IRT-like score
     df['ability_delta'] = df['u_cum_acc'] - df['q_cum_acc']
     df['irt_score'] = 1 / (1 + np.exp(-(df['ability_delta'])))
+    df['diff_gap'] = df['difficulty'] - df['q_cum_acc']
 
     # Attempt number per (user, question)
     df['attempt_n'] = df.groupby(['user_id', 'question_id']).cumcount()
     df['is_repeat']  = (df['attempt_n'] > 0).astype(int)
+    df['log_sess_pos'] = 0.0
 
     # Time since last attempt of this question
     df['last_q_ts'] = df.groupby('question_id')['timestamp'].shift(1)
     df['log_time_since_q'] = np.log1p(df['timestamp'] - df['last_q_ts'].fillna(df['timestamp']))
+    df['first_user_ts'] = grp['timestamp'].transform('min')
+    df['log_time_since_first_q'] = np.log1p(df['timestamp'] - df['first_user_ts'])
 
     # Session position (gap > 30 min = new session)
     df['ts_diff']    = df.groupby('user_id')['timestamp'].diff().fillna(0)
     df['new_session']= (df['ts_diff'] > 1_800_000).astype(int)
-    df['in_sess_pos']= df.groupby(['user_id', df.groupby('user_id')['new_session'].cumsum()]).cumcount()
+    df['session_id']  = df.groupby('user_id')['new_session'].cumsum()
+    df['in_sess_pos'] = df.groupby(['user_id', 'session_id']).cumcount()
+    df['log_sess_pos'] = np.log1p(df['in_sess_pos'])
 
     # Categorical encodings
     df['user_cat']     = df['user_id'].astype('category').cat.codes
     df['question_cat'] = df['question_id'].astype('category').cat.codes
 
     feat_cols = [
-        'difficulty','hour','dow','q_freq','u_total','u_cum_acc',
-        'u_roll5','u_roll10','u_roll20','u_trend','prev_correct',
-        'u_diff_acc','q_cum_acc','ability_delta','irt_score',
-        'attempt_n','is_repeat','log_time_since_q','in_sess_pos',
-        'q_hardness','user_cat','question_cat'
+        'ability_delta','attempt_n','dataset_cat','diff_gap','difficulty',
+        'dow','hour','in_sess_pos','irt_score','is_repeat',
+        'log_sess_pos','log_time_since_first_q','log_time_since_q','month','part',
+        'pq_exp','pq_time','prev_correct','q_cum_acc','q_freq','q_hardness',
+        'q_target_enc','q_total','question_cat','time_bucket','u_cum_acc',
+        'u_diff_acc','u_ewm10','u_ewm3','u_ewm5','u_freq','u_roll10',
+        'u_roll20','u_roll3','u_roll5','u_streak','u_target_enc','u_total',
+        'u_trend','user_cat'
     ]
     X = df[feat_cols].fillna(0)
     y = df['correct']
@@ -170,7 +260,7 @@ def _fe_progress(df):
 
 df_prog = load_csv('progress_training.csv', nrows=80_000)
 lgb_prog = joblib.load(os.path.join(MODEL_DIR, 'progress/lgb_model.pkl'))
-feat_cols_prog = lgb_prog.feature_name()
+feat_cols_prog = _lgb_feature_names(lgb_prog, fallback_count=X_prog.shape[1] if 'X_prog' in locals() else None)
 print(f'  LGB progress features ({len(feat_cols_prog)}): {feat_cols_prog[:5]}...')
 
 if df_prog is not None and not df_prog.empty:
@@ -186,8 +276,8 @@ if df_prog is not None and not df_prog.empty:
     print('  Plotting feature importance...')
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 
-    fi_split = lgb_prog.feature_importance(importance_type='split')
-    fi_gain  = lgb_prog.feature_importance(importance_type='gain')
+    fi_split = _lgb_importance(lgb_prog, importance_type='split')
+    fi_gain  = _lgb_importance(lgb_prog, importance_type='gain')
     fi_df = pd.DataFrame({'feature': feat_cols_prog, 'split': fi_split, 'gain': fi_gain})
 
 
@@ -201,7 +291,8 @@ if df_prog is not None and not df_prog.empty:
 
     # --- 1b. ROC Curve + Precision-Recall ---
     print('  Computing ROC + PR curves...')
-    y_prob = lgb_prog.predict(X_te)
+    y_prob_raw = _lgb_predict_proba(lgb_prog, X_te)
+    y_prob = y_prob_raw[:, 1] if isinstance(y_prob_raw, np.ndarray) and y_prob_raw.ndim == 2 and y_prob_raw.shape[1] > 1 else np.asarray(y_prob_raw)
     auc = roc_auc_score(y_te, y_prob)
     fpr, tpr, _ = roc_curve(y_te, y_prob)
     ap  = average_precision_score(y_te, y_prob)
@@ -392,7 +483,7 @@ if df_mot is not None and not df_mot.empty:
     # Evaluate
     rf_prob  = rf_mot.predict_proba(X_te_ms)
     xgb_prob = xgb_mot.predict_proba(X_te_ms)
-    lgb_prob = lgb_mot.predict(X_te_m.values)
+    lgb_prob = _lgb_predict_proba(lgb_mot, X_te_m.values)
 
     rf_pred_m  = rf_mot.predict(X_te_ms)
     xgb_pred_m = xgb_mot.predict(X_te_ms)
@@ -464,7 +555,7 @@ if df_mot is not None and not df_mot.empty:
     # --- 2c. Feature Importance ---
     print('  Plotting feature importances...')
     rf_fi  = pd.Series(rf_mot.feature_importances_, index=feat_cols_mot).nlargest(20)
-    lgb_fi = pd.Series(lgb_mot.feature_importance(importance_type='gain'),
+    lgb_fi = pd.Series(_lgb_importance(lgb_mot, importance_type='gain'),
                        index=feat_cols_mot_safe).nlargest(20)
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 8))
@@ -647,26 +738,43 @@ print('  Profiling plots done.\n')
 print('[4/4] RESCHEDULE AGENT ─────────────────────────────────')
 
 def _fe_reschedule(df):
-    """Replicate the 9-feature engineering for reschedule models."""
+    """Build the 18-feature schema expected by the saved reschedule scaler/model."""
     df = df.copy()
     df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
-    df['next_ts']   = pd.to_numeric(df['next_ts'],   errors='coerce')
-    df['delta_s']   = pd.to_numeric(df['delta_s'],   errors='coerce')
+    df['delta_s'] = pd.to_numeric(df['delta_s'], errors='coerce')
     df = df.sort_values(['user_id', 'timestamp']).dropna(subset=['delta_s'])
 
-    df['q_freq']  = df['question_id'].map(df['question_id'].value_counts())
-    df['u_freq']  = df['user_id'].map(df['user_id'].value_counts())
-    df['hour']    = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce').dt.hour.fillna(12)
-    df['dow']     = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce').dt.dayofweek.fillna(0)
+    timestamp_dt = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
+    df['hour'] = timestamp_dt.dt.hour.fillna(12)
+    df['dow'] = timestamp_dt.dt.dayofweek.fillna(0)
+    df['dataset_cat'] = 0
 
-    grp = df.groupby('user_id')
-    df['u_count']      = grp.cumcount()
-    df['u_mean_delta'] = grp['delta_s'].transform(lambda s: s.shift(1).expanding().mean().fillna(s.median()))
-    df['u_std_delta']  = grp['delta_s'].transform(lambda s: s.shift(1).expanding().std().fillna(1.0))
-    df['is_long_gap']  = (df['delta_s'] > df['delta_s'].quantile(0.75)).astype(int)
+    grp = df.groupby('user_id', sort=False)
+    df['u_total'] = grp.cumcount()
+    df['u_cum_acc'] = grp['correct'].transform(lambda s: s.shift(1).expanding().mean().fillna(0.5))
+    df['u_roll5'] = grp['correct'].transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean().fillna(0.5))
+    df['u_roll20'] = grp['correct'].transform(lambda s: s.shift(1).rolling(20, min_periods=1).mean().fillna(0.5))
+    df['prev_correct'] = grp['correct'].shift(1).fillna(0.5)
+    df['log_ts_diff'] = grp['timestamp'].diff().fillna(0).clip(lower=0)
+    df['log_ts_diff'] = np.log1p(df['log_ts_diff'])
+    df['new_session'] = (grp['timestamp'].diff().fillna(0) > 1_800_000).astype(int)
 
-    feat_cols = ['correct','q_freq','u_freq','hour','dow',
-                 'u_count','u_mean_delta','u_std_delta','is_long_gap']
+    qgrp = df.groupby('question_id', sort=False)
+    df['q_cum_acc'] = qgrp['correct'].transform(lambda s: s.shift(1).expanding().mean().fillna(0.5))
+    df['q_hardness'] = 1 - df['q_cum_acc']
+    df['ability_delta'] = df['u_cum_acc'] - df['q_cum_acc']
+    df['irt_score'] = 1 / (1 + np.exp(-(df['ability_delta'])))
+    df['attempt_n'] = df.groupby(['user_id', 'question_id']).cumcount()
+    df['is_repeat'] = (df['attempt_n'] > 0).astype(int)
+    df['user_cat'] = df['user_id'].astype('category').cat.codes
+    df['question_cat'] = df['question_id'].astype('category').cat.codes
+
+    feat_cols = [
+        'hour', 'dow', 'u_cum_acc', 'u_roll5', 'u_roll20', 'u_total',
+        'prev_correct', 'q_cum_acc', 'q_hardness', 'ability_delta',
+        'irt_score', 'attempt_n', 'is_repeat', 'log_ts_diff',
+        'new_session', 'user_cat', 'question_cat', 'dataset_cat',
+    ]
     X = df[feat_cols].fillna(0)
     y = np.log1p(df['delta_s'].clip(lower=0))  # log1p target for stability
     return X, y, feat_cols

@@ -94,7 +94,7 @@ async def classify_motivation(
 
 
 @router.get("/tips")
-async def get_motivation_tips(current_user: User = Depends(_get_user)):
+async def get_motivation_tips():
     return {
         "tips": [
             "Consistency beats intensity - show up every day.",

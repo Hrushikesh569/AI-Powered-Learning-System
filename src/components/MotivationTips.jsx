@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { agentAPI, getAuthToken } from '../api';
+import { motivationTips as fallbackTips } from '../data/mockData';
 import { Sparkles } from 'lucide-react';
 
 
@@ -19,7 +20,7 @@ const MotivationTips = () => {
                 const res = await agentAPI.getMotivationTips(token);
                 setTips(res.tips || []);
             } catch (err) {
-                setError('Failed to load motivation tips.');
+                setTips(fallbackTips);
             } finally {
                 setLoading(false);
             }

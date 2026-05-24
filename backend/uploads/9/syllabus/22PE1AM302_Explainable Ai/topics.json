@@ -1,0 +1,77 @@
+{
+  "subject_name": "Explainable Ai",
+  "subject_code": "22PE1AM302",
+  "overview": "Course materials for Explainable Ai.",
+  "units": [
+    {
+      "unit_name": "UNIT-I:",
+      "unit_number": 1,
+      "topics": [
+        "Introduction: Black-Box problem",
+        "Goals",
+        "Brief History",
+        "Purpose",
+        "Societal Impact",
+        "Types of Explanations",
+        "Trade-offs",
+        "Taxonomy",
+        "Exploratory Data Analysis",
+        "Feature Engineering"
+      ]
+    },
+    {
+      "unit_name": "UNIT-II:",
+      "unit_number": 2,
+      "topics": [
+        "Model Visualization Techniques and Traditional Interpretable Algorithms: Model Validation",
+        "Evaluation",
+        "And Hyperparameters",
+        "Model Selection and Visualization",
+        "Classification Model Visualization",
+        "Regression Model Visualization",
+        "Clustering Model  Visualization",
+        "Interpretable Machine Learning Properties",
+        "Traditional Interpretable Algorithms"
+      ]
+    },
+    {
+      "unit_name": "UNIT-III:",
+      "unit_number": 3,
+      "topics": [
+        "Tools and Libraries",
+        "Ensemble-Based",
+        "Decision Tree-Based",
+        "Rule-Based Techniques",
+        "Scoring System. Post-Hoc Interpretability and Explanations: Tools and Libraries",
+        "Visual Explanation",
+        "Feature Importance",
+        "Example-Based"
+      ]
+    },
+    {
+      "unit_name": "UNIT-IV:",
+      "unit_number": 4,
+      "topics": [
+        "Explainable Deep Learning: Applications",
+        "Tools and Libraries",
+        "Intrinsic",
+        "Perturbation",
+        "Gradient / Backpropagation"
+      ]
+    },
+    {
+      "unit_name": "UNIT-V:",
+      "unit_number": 5,
+      "topics": [
+        "Explainability: Time Series Forecasting",
+        "Natural Language Processing",
+        "And Computer Vision XAI: Challenges: Properties of Explanation",
+        "Categories of Explanation",
+        "Adoption of Interpretable Techniques",
+        "Human-Machine Collaboration",
+        "Collective Intelligence from Multiple Disciplines",
+        "Responsible"
+      ]
+    }
+  ]
+}

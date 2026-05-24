@@ -50,6 +50,9 @@ class ProfileInput(BaseModel):
     grades: Optional[List[str]] = []
     studyHoursPerWeek: Optional[float] = 4.0  
     attendanceRate: Optional[float] = 80.0
+    performance: Optional[str] = None
+    motivation: Optional[float] = None
+    learningStyle: Optional[str] = None
 
 
 class ProfileResponse(BaseModel):
@@ -103,6 +106,29 @@ async def classify_profile(
     # Save cluster to user in database
     current_user.profile_cluster = cluster
     db.add(current_user)
+
+    profile_payload = payload.model_dump()
+    profile_payload.update({
+        "academicPerformance": payload.performance,
+        "motivationLevel": payload.motivation,
+        "learningStyle": payload.learningStyle,
+    })
+
+    existing = await db.execute(
+        select(UserProfile)
+        .where(UserProfile.user_id == current_user.id)
+        .order_by(UserProfile.updated_at.desc())
+    )
+    profile_row = existing.scalar_one_or_none()
+    if profile_row:
+        profile_row.profile_label = CLUSTER_NAMES.get(cluster, f"Cluster {cluster}")
+        profile_row.features = profile_payload
+    else:
+        db.add(UserProfile(
+            user_id=current_user.id,
+            profile_label=CLUSTER_NAMES.get(cluster, f"Cluster {cluster}"),
+            features=profile_payload,
+        ))
     await db.commit()
     
     return ProfileResponse(

@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Docker Compose sets OLLAMA_URL=http://ollama:11434 explicitly.
 # For local dev without Docker the default falls back to localhost.
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-GEN_MODEL  = os.getenv("OLLAMA_GEN_MODEL", "llama3.2:1b")
+GEN_MODEL  = os.getenv("OLLAMA_GEN_MODEL", "mistral:latest")
 
 # Performance tuning knobs for large syllabus files.
 LLM_SUBJECT_EXCERPT_CHARS = int(os.getenv("SYLLABUS_LLM_SUBJECT_EXCERPT_CHARS", "4500"))
@@ -95,6 +95,14 @@ DIFFICULTY_HOURS = {1: 0.5, 2: 1.0, 3: 2.0, 4: 3.5, 5: 5.0}
 DIFFICULTY_MULT = {1: 0.5, 2: 0.75, 3: 1.0, 4: 1.5, 5: 2.5}
 
 TIME_SLOTS = ["09:00 AM", "11:00 AM", "02:00 PM", "05:00 PM", "08:00 PM"]
+
+
+def _topic_key(subject: str, unit: str, topic: str) -> str:
+    return " | ".join([
+        str(subject or "").strip().lower(),
+        str(unit or "").strip().lower(),
+        str(topic or "").strip().lower(),
+    ])
 
 
 def build_time_slots(start_hour: int = 9, end_hour: int = 23, num_slots: int = 5) -> list[str]:
@@ -337,12 +345,14 @@ async def _llm_json(prompt: str, timeout: float = 90.0) -> Optional[dict]:
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": GEN_MODEL,
+                    "format": "json",
                     "messages": [
                         {"role": "system", "content": _SYS_ANALYST},
                         {"role": "user",   "content": prompt},
                     ],
                     "stream": False,
-                    "options": {"temperature": 0.05, "num_predict": 2048},
+                    "keep_alive": "10m",
+                    "options": {"temperature": 0.0, "num_predict": 512, "num_ctx": 2048},
                 },
                 timeout=timeout,
             )
@@ -694,8 +704,15 @@ async def analyze_syllabus(text: str, subject: str) -> dict:
             for t in unit.get("topics", []):
                 if not isinstance(t, dict):
                     continue
-                diff = int(t.get("difficulty", 3))
+                raw_diff = t.get("difficulty", 3)
+                try:
+                    diff = int(raw_diff)
+                except Exception:
+                    diff = 3
                 diff = max(1, min(5, diff))
+                kw_diff = _keyword_difficulty(str(t.get("name", "")))
+                if kw_diff and (raw_diff in (None, "", 3, "3", "Intermediate", "Medium", "medium") or diff == 3):
+                    diff = kw_diff
                 t["difficulty"] = diff
                 t.setdefault("est_hours", DIFFICULTY_HOURS[diff])
                 t.setdefault("prerequisites", [])
@@ -1019,9 +1036,11 @@ def generate_intelligent_schedule(
     *,
     hours_per_day: float = 3.0,
     num_days: int = 30,
+    start_date: date | None = None,
     subject_priorities: dict[str, int] | None = None,
     cross_subject_relations: list[dict] | None = None,
     user_overrides: dict[str, dict] | None = None,
+    topic_guidance: dict[str, dict[str, Any]] | None = None,
     study_start_hour: int = 9,
     study_end_hour: int = 23,
 ) -> dict:
@@ -1040,6 +1059,7 @@ def generate_intelligent_schedule(
          appended with extended dates so the full curriculum is always shown.
     """
     subject_priorities = subject_priorities or {}
+    topic_guidance = topic_guidance or {}
     
     # Build time slots within user's study window
     time_slots = build_time_slots(study_start_hour, study_end_hour)
@@ -1049,7 +1069,7 @@ def generate_intelligent_schedule(
     if not analyses:
         return {"schedule": [], "summary": {}}
 
-    today = date.today()
+    today = start_date or date.today()
 
     # ── Per-subject ordered topic lists ──────────────────────────────────────
     subj_ordered: list[tuple[str, str, list[dict]]] = []
@@ -1057,12 +1077,37 @@ def generate_intelligent_schedule(
         subj = analysis.get("subject_name", "Unknown")
         subj_code = analysis.get("subject_code", "")
         flat: list[dict] = []
-        for unit in analysis.get("units", []):
-            for t in unit.get("topics", []):
-                flat.append({**t, "subject": subj, "subject_code": subj_code, "unit": unit.get("unit_name", ""), "unit_number": unit.get("unit_number", 0)})
+        units = sorted(analysis.get("units", []), key=lambda u: u.get("unit_number", 0))
+        for unit in units:
+            unit_name = unit.get("unit_name", "")
+            unit_number = unit.get("unit_number", 0)
+            for topic_index, t in enumerate(unit.get("topics", [])):
+                topic_name = t.get("name", "")
+                guidance = topic_guidance.get(_topic_key(subj, unit_name, topic_name), {})
+                flat.append({
+                    **t,
+                    "subject": subj,
+                    "subject_code": subj_code,
+                    "unit": unit_name,
+                    "unit_number": unit_number,
+                    "topic_index": topic_index,
+                    "_priority": int(guidance.get("priority", 500)),
+                    "_earliest_day_offset": int(guidance.get("earliest_day_offset", 0)),
+                })
         if not flat:
             continue
-        ordered = _topological_sort(flat)
+        # Preserve the extracted unit/topic order by default; if topic guidance
+        # is available, use it to pull missed or urgent topics forward.
+        ordered = sorted(
+            flat,
+            key=lambda t: (
+                t.get("_earliest_day_offset", 0),
+                t.get("_priority", 500),
+                t.get("unit_number", 0),
+                t.get("topic_index", 0),
+                t.get("name", ""),
+            ),
+        )
         subj_ordered.append((subj, subj_code, ordered))
 
     if not subj_ordered:
@@ -1096,42 +1141,52 @@ def generate_intelligent_schedule(
     schedule: list[dict] = []
     task_id = 1
     current_day = today
-    seq_pos = 0
     day_num = 0
     total_topics = sum(len(t[2]) for t in subj_ordered)
     placed = 0
 
+    subject_indices = list(range(len(subj_ordered)))
     while day_num < num_days and placed < total_topics:
         daily_hours_remaining = hours_per_day
         slot_idx = 0
+        placed_today = 0
+        rotation_start = day_num % len(subject_indices) if subject_indices else 0
+        day_subject_indices = subject_indices[rotation_start:] + subject_indices[:rotation_start]
 
-        while daily_hours_remaining > 0.25 and slot_idx < len(TIME_SLOTS):
-            # Pick next subject with topics remaining
-            found = False
-            for attempt in range(len(subj_ordered)):
-                s_idx = interleave_seq[seq_pos % len(interleave_seq)]
-                seq_pos += 1
-                if pointers[s_idx] < len(subj_ordered[s_idx][2]):
-                    found = True
-                    break
-
-            if not found:
+        for s_idx in day_subject_indices:
+            if placed >= total_topics or slot_idx >= len(TIME_SLOTS):
                 break
+            if pointers[s_idx] >= len(subj_ordered[s_idx][2]):
+                continue
 
             subj_name, subj_code, topics = subj_ordered[s_idx]
             t = topics[pointers[s_idx]]
-            pointers[s_idx] += 1
-            placed += 1
 
-            diff = int(t.get("difficulty", 3))
+            raw_diff = t.get("difficulty", 3)
+            try:
+                diff = int(raw_diff)
+            except Exception:
+                diff = 3
             diff = max(1, min(5, diff))
+            kw_diff = _keyword_difficulty(str(t.get("name", "")))
+            if kw_diff and (raw_diff in (None, "", 3, "3", "Intermediate", "Medium", "medium") or diff == 3):
+                diff = kw_diff
             base_h = float(t.get("est_hours", DIFFICULTY_HOURS[diff]))
             override_h = float(user_overrides.get(t["name"], {}).get("extra_hours", 0.0))
             total_h = base_h + override_h
 
-            duration_str = (
-                f"{total_h:.0f}h" if total_h >= 1.0 else f"{int(total_h * 60)}min"
-            )
+            if total_h > daily_hours_remaining and placed_today > 0:
+                continue
+            if total_h > daily_hours_remaining and placed_today == 0 and total_h > hours_per_day:
+                continue
+            if total_h > daily_hours_remaining:
+                continue
+
+            pointers[s_idx] += 1
+            placed += 1
+            placed_today += 1
+
+            duration_str = f"{total_h:.0f}h" if total_h >= 1.0 else f"{int(total_h * 60)}min"
 
             schedule.append({
                 "id": task_id,
@@ -1151,7 +1206,6 @@ def generate_intelligent_schedule(
                 "status": "pending",
             })
             task_id += 1
-
             daily_hours_remaining -= total_h
             slot_idx += 1
 
@@ -1163,8 +1217,15 @@ def generate_intelligent_schedule(
         while pointers[s_idx] < len(topics):
             t = topics[pointers[s_idx]]
             pointers[s_idx] += 1
-            diff = int(t.get("difficulty", 3))
+            raw_diff = t.get("difficulty", 3)
+            try:
+                diff = int(raw_diff)
+            except Exception:
+                diff = 3
             diff = max(1, min(5, diff))
+            kw_diff = _keyword_difficulty(str(t.get("name", "")))
+            if kw_diff and (raw_diff in (None, "", 3, "3", "Intermediate", "Medium", "medium") or diff == 3):
+                diff = kw_diff
             total_h = float(t.get("est_hours", DIFFICULTY_HOURS[diff]))
             schedule.append({
                 "id": task_id,
@@ -1204,3 +1265,201 @@ def generate_intelligent_schedule(
             "crossSubjectRelations": len(cross_subject_relations),
         },
     }
+
+
+async def generate_llm_adaptive_schedule(
+    analyses: list[dict],
+    *,
+    hours_per_day: float = 3.0,
+    num_days: int = 30,
+    start_date: date | None = None,
+    subject_priorities: dict[str, int] | None = None,
+    cross_subject_relations: list[dict] | None = None,
+    user_overrides: dict[str, dict] | None = None,
+    study_start_hour: int = 9,
+    study_end_hour: int = 23,
+    stress_level: float = 0.3,
+    performance_score: float = 0.7,
+    completed_topics: list[str] | None = None,
+    missed_topics: list[str] | None = None,
+    skipped_topics: list[str] | None = None,
+    do_later_topics: list[str] | None = None,
+) -> dict:
+    """Generate a live schedule with LLM-guided topic priorities.
+
+    The LLM ranks and defers topics. The deterministic packer still handles
+    the actual day-by-day schedule so study-hour limits remain reliable.
+    """
+
+    start_date = start_date or (date.today() + timedelta(days=1))
+    subject_priorities = subject_priorities or {}
+    cross_subject_relations = cross_subject_relations or []
+    user_overrides = user_overrides or {}
+    completed_topics = [t for t in (completed_topics or []) if t]
+    missed_topics = [t for t in (missed_topics or []) if t]
+    skipped_topics = [t for t in (skipped_topics or []) if t]
+    do_later_topics = [t for t in (do_later_topics or []) if t]
+
+    all_topics: list[dict] = []
+    name_index: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+
+    for analysis in analyses or []:
+        subj = analysis.get("subject_name", "Unknown")
+        subj_code = analysis.get("subject_code", "")
+        units = sorted(analysis.get("units", []), key=lambda u: u.get("unit_number", 0))
+        for unit in units:
+            unit_name = unit.get("unit_name", "")
+            unit_number = unit.get("unit_number", 0)
+            for topic_index, topic in enumerate(unit.get("topics", []) or []):
+                topic_name = topic.get("name", "")
+                all_topics.append({
+                    "subject": subj,
+                    "subject_code": subj_code,
+                    "unit": unit_name,
+                    "unit_number": unit_number,
+                    "topic_index": topic_index,
+                    "topic": topic_name,
+                    "difficulty": topic.get("difficulty", 3),
+                    "est_hours": topic.get("est_hours", 1.0),
+                    "is_foundational": topic.get("is_foundational", False),
+                })
+                name_index[topic_name.strip().lower()].append((subj, unit_name, topic_name))
+
+    if not all_topics:
+        return {"schedule": [], "summary": {}, "planner": {"mode": "rag-llm", "used_llm": False}}
+
+    topic_guidance: dict[str, dict[str, Any]] = {}
+    for item in all_topics:
+        raw_diff = item.get("difficulty", 3)
+        try:
+            diff = int(raw_diff)
+        except Exception:
+            diff = 3
+        diff = max(1, min(5, diff))
+        priority = 500 + diff * 10
+        if item.get("is_foundational"):
+            priority -= 25
+        topic_guidance[_topic_key(item["subject"], item["unit"], item["topic"])] = {
+            "priority": priority,
+            "earliest_day_offset": 0,
+        }
+
+    def _match(name: str) -> tuple[str, str, str] | None:
+        return (name_index.get(name.strip().lower()) or [None])[0]
+
+    topic_briefs = sorted(
+        [
+            {
+                "subject": item["subject"],
+                "unit": item["unit"],
+                "topic": item["topic"],
+                "difficulty": int(item.get("difficulty", 3) or 3),
+                "is_foundational": bool(item.get("is_foundational", False)),
+                "est_hours": float(item.get("est_hours", 1.0) or 1.0),
+            }
+            for item in all_topics
+        ],
+        key=lambda item: (-int(item["difficulty"]), item["subject"], item["unit"], item["topic"]),
+    )[:24]
+
+    prompt_payload = {
+        "start_date": start_date.isoformat(),
+        "hours_per_day": hours_per_day,
+        "num_days": num_days,
+        "study_window": {"start_hour": study_start_hour, "end_hour": study_end_hour},
+        "stress_level": round(stress_level, 3),
+        "performance_score": round(performance_score, 3),
+        "completed_topics": completed_topics[:20],
+        "missed_topics": missed_topics[:20],
+        "skipped_topics": skipped_topics[:20],
+        "do_later_topics": do_later_topics[:20],
+        "topic_pool": topic_briefs,
+    }
+
+    prompt = (
+        "You are a live study scheduler for a student learning app. "
+        "Return strict JSON only. Prioritize missed topics first, keep skipped topics for the next day, "
+        "and place do-later topics after more urgent items. Mix difficult and easy topics when possible.\n\n"
+        "Output schema:\n"
+        "{\n"
+        '  "topic_guidance": [\n'
+        '    {"subject":"...","unit":"...","topic":"...","priority":1,"earliest_day_offset":0,"action":"study|review|defer","reason":"..."}\n'
+        "  ],\n"
+        '  "subject_priorities": {"Subject": 1},\n'
+        '  "summary": {"focus":"...","balance":"...","carry_forward":"..."}\n'
+        "}\n\n"
+        f"Planning input:\n{json.dumps(prompt_payload, ensure_ascii=False)[:6000]}"
+    )
+
+    llm_result = await _llm_json(prompt, timeout=60.0)
+    llm_used = bool(llm_result)
+    fallback_summary = {
+        "focus": f"Prioritized {len(missed_topics)} missed, {len(skipped_topics)} skipped, and {len(do_later_topics)} deferred topics across the live plan.",
+        "balance": f"Distributed {len(all_topics)} topics using deterministic subject weights across {len(subject_priorities) or len({item['subject'] for item in all_topics})} subjects.",
+        "carry_forward": f"Deterministic carry-forward applied because the LLM planner did not return in time.",
+    }
+
+    if llm_result:
+        for item in llm_result.get("topic_guidance", []) or []:
+            subject = str(item.get("subject", "")).strip()
+            unit = str(item.get("unit", "")).strip()
+            topic = str(item.get("topic", "")).strip()
+            key = _topic_key(subject, unit, topic)
+            if key in topic_guidance:
+                try:
+                    topic_guidance[key] = {
+                        "priority": max(1, int(item.get("priority", topic_guidance[key]["priority"]))),
+                        "earliest_day_offset": max(0, int(item.get("earliest_day_offset", 0))),
+                        "action": str(item.get("action", "study")),
+                        "reason": str(item.get("reason", "")),
+                    }
+                except Exception:
+                    continue
+        for subject, priority in (llm_result.get("subject_priorities", {}) or {}).items():
+            try:
+                subject_priorities[str(subject)] = max(1, min(9, int(priority)))
+            except Exception:
+                continue
+
+    def _apply_force(topic_name: str, *, priority: int, offset: int, action: str, reason: str) -> None:
+        match = _match(topic_name)
+        if not match:
+            return
+        key = _topic_key(*match)
+        topic_guidance[key] = {
+            "priority": priority,
+            "earliest_day_offset": offset,
+            "action": action,
+            "reason": reason,
+        }
+
+    for name in missed_topics:
+        _apply_force(name, priority=1, offset=0, action="review", reason="missed topic moved to the next planning day")
+    for name in skipped_topics:
+        _apply_force(name, priority=3, offset=1, action="defer", reason="skip tomorrow")
+    for name in do_later_topics:
+        _apply_force(name, priority=700, offset=2, action="defer", reason="do later")
+    for name in completed_topics:
+        _apply_force(name, priority=9999, offset=999, action="completed", reason="already completed")
+
+    schedule_result = generate_intelligent_schedule(
+        analyses,
+        hours_per_day=hours_per_day,
+        num_days=num_days,
+        start_date=start_date,
+        subject_priorities=subject_priorities,
+        cross_subject_relations=cross_subject_relations,
+        user_overrides=user_overrides,
+        topic_guidance=topic_guidance,
+        study_start_hour=study_start_hour,
+        study_end_hour=study_end_hour,
+    )
+
+    schedule_result["planner"] = {
+        "mode": "rag-llm",
+        "used_llm": llm_used,
+        "start_date": start_date.isoformat(),
+        "topic_guidance_count": len(topic_guidance),
+    }
+    schedule_result["llm_summary"] = (llm_result or {}).get("summary", {}) or fallback_summary
+    return schedule_result
