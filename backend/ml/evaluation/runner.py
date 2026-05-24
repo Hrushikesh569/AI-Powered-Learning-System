@@ -20,6 +20,23 @@ from ml.evaluation import custom_metrics
 import mlflow
 
 
+def _ensure_local_file_tracking_store() -> None:
+    tracking_uri = os.getenv('MLFLOW_TRACKING_URI', '')
+    if not tracking_uri.startswith('file:'):
+        return
+
+    local_path = tracking_uri
+    if local_path.startswith('file:///'):
+        local_path = local_path[len('file:///'):]
+    elif local_path.startswith('file://'):
+        local_path = local_path[len('file://'):]
+    else:
+        local_path = local_path[len('file:'):]
+
+    if local_path:
+        os.makedirs(local_path, exist_ok=True)
+
+
 def _dummy_reward(action):
     """Simple reward: negative L2 norm of action (encourage small adjustments)."""
     a = np.array(action)
@@ -45,6 +62,10 @@ def run_agent_evaluation(agent_name: str = 'schedule', runs: int = 50, state_dim
     actions = []
     rewards = []
 
+    tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
+    if tracking_uri:
+        _ensure_local_file_tracking_store()
+        mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment)
     with mlflow.start_run(run_name=f"{agent_name}-synthetic"):
         for i in range(runs):
