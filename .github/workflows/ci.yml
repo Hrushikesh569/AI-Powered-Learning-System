@@ -60,6 +60,7 @@ jobs:
           name: coverage-report
           path: coverage.xml
       - name: Upload coverage to Codecov
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v4
         with:
           files: coverage.xml
